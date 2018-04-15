@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"github.com/go-log/log"
 	"errors"
+	"time"
+	"io/ioutil"
+	"encoding/json"
 )
 
 const (
-	INDEX_FILE_POSTFIX = "index"
-	MSG_FILE_POSTFIX   = "msg"
+	IndexFilePostfix = "index"
+	MsgFilePostfix   = "msg"
+	MetaFilePostfix  = "meta"
 )
 
 // 为了
@@ -22,19 +26,19 @@ type Partition interface {
 	WriteMultiMsg([]*Msg) error
 
 	// 读取指定offset的数据
-	ReadMsg(offset int) ([]byte, error)
+	ReadMsg(uint64) ([]byte, error)
 
-	ReadMultiMsg(startOffset, msgLen int) ([][]byte, error)
+	ReadMultiMsg(uint64, uint32) ([][]byte, error)
 
 }
 
 type Index interface {
 
 	// 获取消息位置
-	Position(offset uint64) (uint64, uint32, error)
+	Position(offset uint64) (position uint64, length uint32, err error)
 
 	// 写入消息时包含长度
-	WriteIndex(uint64, uint64, uint32)
+	WriteIndex(offset, position uint64, length uint32) error
 
 }
 
@@ -42,7 +46,7 @@ type Index interface {
 // 需要写入消息，获取消息
 // 不支持切换文件
 type FilePartition struct {
-	Name              string
+	Id                uint
 
 	Index             *FileIndex
 
@@ -60,12 +64,11 @@ type FilePartition struct {
 	// reader
 	msgReader         *mmap.ReaderAt // 用于读取msg
 
+	metaRWer          *os.File
 }
 
 // 保存 8byte offset， 8 byte position， 4 byte len = 20
 type FileIndex struct {
-	Name              string
-
 	indexMutex        sync.Mutex
 	// 最新保存的消息的索引
 	latestIndexOffset uint64
@@ -79,19 +82,57 @@ type FileIndex struct {
 	indexReader       *os.File
 }
 
-// TODO 当第二次启动时应先读取偏移量(建议保存在raft中统一保存)， 保存index和msg的最新位置和索引
-func NewFilePartition(name string) (fp *FilePartition, err error) {
+type PartitionConfig struct {
+	Id          uint
+	Topic       string
+	DataPath    string
+	SaveInterval time.Duration
+}
+
+type PartitionInfo struct {
+	PartitionLatestPosition          uint64 `json:"partition.latest_position"`
+	PartitionLatestMsgOffset         uint64 `json:"partition.latest_msg_offset"`
+	PartitionLastWritePositionOffset uint   `json:"partition.last_write_position_offset"`
+	PartitionLastWriteMsgOffset      uint   `json:"partition.last_write_msg_offset"`
+	IndexLatestPosition              uint64 `json:"index.latest_position"`
+	IndexLatestIndexOffset           uint64 `json:"index.latest_index_offset"`
+	IndexLastWritePositionOffset     uint `json:"index.last_write_position_offset"`
+}
+
+func DefaultPartitionConfig(id uint, topic string) *PartitionConfig {
+	return &PartitionConfig{
+		Id: id,
+		Topic: topic,
+		DataPath: HomePath() + "/fqueue",
+		SaveInterval: 500 * time.Millisecond, // 500ms
+	}
+}
+
+// TODO 当第二次启动时应先读取偏移量(在文件中保存)， 保存index和msg的最新位置和索引
+func NewFilePartition(id uint) (fp *FilePartition, err error) {
 	fp = new(FilePartition)
 
+	config := DefaultPartitionConfig(id, "temp-topic")
+	// 创建文件夹
+	path := fmt.Sprintf("%s/%s/partition-%d", config.DataPath, config.Topic,  config.Id)
+
+	name := fmt.Sprintf("%s/partition-%d", path, config.Id)
+
+	err = os.MkdirAll(path, 0755)
+
+	if err != nil {
+		log.Logf("create partition dir failed: %v", err)
+		return
+	}
 	// msg
-	fp.Name = fmt.Sprintf("%s.%s", name, MSG_FILE_POSTFIX)
-	fp.msgWriter, err = os.OpenFile(fp.Name, os.O_CREATE | os.O_WRONLY, 0755)
+	msgFileName := fmt.Sprintf("%s.%s", name, MsgFilePostfix)
+	fp.msgWriter, err = os.OpenFile(msgFileName, os.O_CREATE | os.O_WRONLY, 0755)
 	if err != nil {
 		log.Logf("open msg write file error: %v", err)
 		return
 	}
 
-	fp.msgReader, err = mmap.Open(fp.Name)
+	fp.msgReader, err = mmap.Open(msgFileName)
 	if err != nil {
 		log.Logf("open mmap msg read file error: %v", err)
 		return
@@ -99,19 +140,27 @@ func NewFilePartition(name string) (fp *FilePartition, err error) {
 
 	// index
 	fp.Index = new(FileIndex)
-	fp.Index.Name = fmt.Sprintf("%s.%s", name, INDEX_FILE_POSTFIX)
+	indexFileName := fmt.Sprintf("%s.%s", name, IndexFilePostfix)
 
-	fp.Index.indexWriter, err = os.OpenFile(fp.Index.Name, os.O_CREATE | os.O_WRONLY, 0755);
+	fp.Index.indexWriter, err = os.OpenFile(indexFileName, os.O_CREATE | os.O_WRONLY, 0755);
 	if err != nil {
 		log.Logf("open index write file error: %v", err)
 		return
 	}
 
-	fp.Index.indexReader, err = os.OpenFile(fp.Index.Name, os.O_CREATE | os.O_RDONLY, 0755);
+	fp.Index.indexReader, err = os.OpenFile(indexFileName, os.O_CREATE | os.O_RDONLY, 0755);
 	if err != nil {
 		log.Logf("open index read file error: %v", err)
 		return
 	}
+
+	metaFileName := fmt.Sprintf("%s.%s", name, MetaFilePostfix)
+
+	fp.metaRWer, err = os.OpenFile(metaFileName, os.O_CREATE | os.O_RDWR, 0755)
+	if err != nil {
+		log.Logf("open meta file error: %v", err)
+	}
+	fp.recoveryInfo()
 
 	return
 }
@@ -186,12 +235,13 @@ func (idx *FileIndex) Close() (err error) {
 }
 
 func (idx *FileIndex) String() string {
-	return fmt.Sprintf("FileIndex: {name: %s, latestIndexOffset: %d, latestPosition: %d, lastPositionOffset: %d}",
-		idx.Name, idx.latestIndexOffset, idx.latestPosition, idx.lastWritePositionOffset)
+	return fmt.Sprintf("FileIndex: {latestIndexOffset: %d, latestPosition: %d, lastPositionOffset: %d}",
+		idx.latestIndexOffset, idx.latestPosition, idx.lastWritePositionOffset)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 
+// TODO 使用raft时，会接收到重做的log，这时候msg中会携带offset，所以应该支持能够写入带offset的msg
 func (p *FilePartition) write(msg []byte) (err error) {
 	p.lastWritePositionOffset = 0
 	p.lastWriteMsgOffset = 0
@@ -297,6 +347,34 @@ func (p *FilePartition) ReadMultiMsg(position uint64, length uint32) (msgs [][]b
 	return
 }
 
+func (p *FilePartition) saveInfo() {
+	// 在空闲时间进行写入
+	p.msgMutex.Lock()
+	defer p.msgMutex.Unlock()
+}
+
+func (p *FilePartition) recoveryInfo() (err error) {
+	// 启动时调用
+	bytes, err := ioutil.ReadAll(p.metaRWer)
+	if err != nil || len(bytes) == 0 {
+		return
+	}
+	var info PartitionInfo
+	err = json.Unmarshal(bytes, &info)
+	if err != nil {
+		log.Log("recovery info failed, file content: %s", string(bytes))
+		return
+	}
+	p.latestPosition = info.PartitionLatestPosition
+	p.latestMsgOffset = info.PartitionLatestPosition
+	p.lastWritePositionOffset = info.PartitionLastWritePositionOffset
+	p.lastWriteMsgOffset = info.PartitionLastWriteMsgOffset
+	p.Index.latestPosition = info.IndexLatestPosition
+	p.Index.latestIndexOffset = info.IndexLatestIndexOffset
+	p.Index.lastWritePositionOffset = info.IndexLastWritePositionOffset
+	return
+}
+
 func (p *FilePartition) Close() (err error) {
 	err = p.Index.Close()
 	if err != nil {
@@ -312,6 +390,6 @@ func (p *FilePartition) Close() (err error) {
 
 func (p *FilePartition) String() string {
 	return fmt.Sprintf("FilePartition: {" +
-		"name: %s, latestMsgOffset: %d, lastestPosition: %d, lastMsgOffset: %d, lastPositionOffset: %d, Index: %v}",
-			p.Name, p.latestMsgOffset, p.latestPosition, p.lastWriteMsgOffset, p.lastWritePositionOffset, p.Index)
+		"id: %d, latestMsgOffset: %d, lastestPosition: %d, lastMsgOffset: %d, lastPositionOffset: %d, Index: %v}",
+			p.Id, p.latestMsgOffset, p.latestPosition, p.lastWriteMsgOffset, p.lastWritePositionOffset, p.Index)
 }
