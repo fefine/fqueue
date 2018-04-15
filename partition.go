@@ -6,7 +6,6 @@ import (
 	"os"
 	"fmt"
 	"github.com/go-log/log"
-	"encoding/binary"
 	"errors"
 )
 
@@ -85,14 +84,14 @@ func NewFilePartition(name string) (fp *FilePartition, err error) {
 	fp = new(FilePartition)
 
 	// msg
-	fp.Name = fmt.Sprintf("%s.%s", name, INDEX_FILE_POSTFIX)
-	fp.msgWriter, err = os.OpenFile(fp.Index.Name, os.O_CREATE | os.O_WRONLY, 0755)
+	fp.Name = fmt.Sprintf("%s.%s", name, MSG_FILE_POSTFIX)
+	fp.msgWriter, err = os.OpenFile(fp.Name, os.O_CREATE | os.O_WRONLY, 0755)
 	if err != nil {
 		log.Logf("open msg write file error: %v", err)
 		return
 	}
 
-	fp.msgReader, err = mmap.Open(fp.msgWriter.Name())
+	fp.msgReader, err = mmap.Open(fp.Name)
 	if err != nil {
 		log.Logf("open mmap msg read file error: %v", err)
 		return
@@ -100,15 +99,15 @@ func NewFilePartition(name string) (fp *FilePartition, err error) {
 
 	// index
 	fp.Index = new(FileIndex)
-	fp.Index.Name = fmt.Sprintf("%s.%s", name, MSG_FILE_POSTFIX)
+	fp.Index.Name = fmt.Sprintf("%s.%s", name, INDEX_FILE_POSTFIX)
 
-	fp.Index.indexWriter, err = os.OpenFile(fp.Name, os.O_CREATE | os.O_WRONLY, 0755);
+	fp.Index.indexWriter, err = os.OpenFile(fp.Index.Name, os.O_CREATE | os.O_WRONLY, 0755);
 	if err != nil {
 		log.Logf("open index write file error: %v", err)
 		return
 	}
 
-	fp.Index.indexReader, err = os.OpenFile(fp.Name, os.O_CREATE | os.O_RDONLY, 0755);
+	fp.Index.indexReader, err = os.OpenFile(fp.Index.Name, os.O_CREATE | os.O_RDONLY, 0755);
 	if err != nil {
 		log.Logf("open index read file error: %v", err)
 		return
@@ -128,15 +127,15 @@ func (idx *FileIndex) write(offset, position uint64, length uint32) (err error) 
 	}
 	idx.indexMutex.Lock()
 	defer idx.indexMutex.Unlock()
-	bytes := make([]byte, 0, 20)
-	binary.LittleEndian.PutUint64(bytes, offset)
-	binary.LittleEndian.PutUint64(bytes[8:16], position)
-	binary.LittleEndian.PutUint32(bytes[16:], length)
+	bytes := make([]byte, 20)
+	Uint64ToByte(offset, bytes[:8])
+	Uint64ToByte(position, bytes[8:16])
+	Uint32ToByte(length, bytes[16:])
 	_, err = idx.indexWriter.WriteAt(bytes, int64(idx.latestPosition))
 	if err != nil {
 		return
 	}
-	idx.latestIndexOffset = offset
+	idx.latestIndexOffset = offset + 1
 	idx.latestPosition += 20
 	idx.lastWritePositionOffset = 20
 	return
@@ -151,7 +150,7 @@ func (idx *FileIndex) rollback() (err error) {
 
 func (idx *FileIndex) read(off uint64) (offset, position uint64, length uint32, err error) {
 	if off > idx.latestIndexOffset {
-		err = errors.New(fmt.Sprintf("%d large then the latest offset %s in this partition", offset, idx.latestIndexOffset))
+		err = errors.New(fmt.Sprintf("%d large then the latest offset %d in this partition", offset, idx.latestIndexOffset))
 		return
 	}
 	dOff := (idx.latestIndexOffset - off) * 20
@@ -162,7 +161,9 @@ func (idx *FileIndex) read(off uint64) (offset, position uint64, length uint32, 
 	if err != nil {
 		return
 	}
-	offset, position, length, err= BytesToIndex(bytes)
+	offset = ByteToUint64(bytes[:8])
+	position = ByteToUint64(bytes[8:16])
+	length = ByteToUint32(bytes[16:])
 	return
 }
 
@@ -175,6 +176,21 @@ func (idx *FileIndex) WriteIndex(offset, position uint64, length uint32) (err er
 	return idx.write(offset, position, length)
 }
 
+func (idx *FileIndex) Close() (err error) {
+	err = idx.indexWriter.Close()
+	if err != nil {
+		return
+	}
+	err = idx.indexReader.Close()
+	return
+}
+
+func (idx *FileIndex) String() string {
+	return fmt.Sprintf("FileIndex: {name: %s, latestIndexOffset: %d, latestPosition: %d, lastPositionOffset: %d}",
+		idx.Name, idx.latestIndexOffset, idx.latestPosition, idx.lastWritePositionOffset)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 
 func (p *FilePartition) write(msg []byte) (err error) {
 	p.lastWritePositionOffset = 0
@@ -215,7 +231,7 @@ func (p *FilePartition) writeMulti(msgs [][]byte) (err error) {
 		if err != nil {
 			// 发生错误, 回滚写入位置
 			p.latestPosition = oldPosition
-			return
+			return err
 		}
 		p.latestPosition += uint64(l)
 	}
@@ -243,6 +259,7 @@ func (p *FilePartition) WriteMsg(msg *Msg) (err error) {
 	length := uint32(len(msg.Source))
 
 	msg.Offset = offset
+	log.Log(offset)
 	for i := 0; i < 8; i++ {
 		msg.Source[i] = byte(offset >> uint((7 - i) * 8) & 0xff)
 	}
@@ -270,7 +287,7 @@ func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 	if err != nil {
 		return
 	}
-	msg = make([]byte, 0, length)
+	msg = make([]byte, length)
 	err = p.read(position, msg)
 	return
 }
@@ -278,4 +295,23 @@ func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 func (p *FilePartition) ReadMultiMsg(position uint64, length uint32) (msgs [][]byte, err error) {
 	// 暂不实现
 	return
+}
+
+func (p *FilePartition) Close() (err error) {
+	err = p.Index.Close()
+	if err != nil {
+		return
+	}
+	err = p.msgReader.Close()
+	if err != nil {
+		return
+	}
+	err = p.msgWriter.Close()
+	return
+}
+
+func (p *FilePartition) String() string {
+	return fmt.Sprintf("FilePartition: {" +
+		"name: %s, latestMsgOffset: %d, lastestPosition: %d, lastMsgOffset: %d, lastPositionOffset: %d, Index: %v}",
+			p.Name, p.latestMsgOffset, p.latestPosition, p.lastWriteMsgOffset, p.lastWritePositionOffset, p.Index)
 }

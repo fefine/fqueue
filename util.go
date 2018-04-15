@@ -1,20 +1,6 @@
 package fqueue
 
-import (
-	"encoding/binary"
-	"errors"
-)
-
-func BytesToIndex(bytes []byte) (offset, position uint64, l uint32, err error) {
-	if len(bytes) != 20 {
-		err = errors.New("bytes len must be 20")
-		return
-	}
-	offset = binary.LittleEndian.Uint64(bytes[:8])
-	position = binary.LittleEndian.Uint64(bytes[8:16])
-	l = binary.LittleEndian.Uint32(bytes[16:])
-	return
-}
+import "hash/crc32"
 
 func Uint64ToByte(num uint64, bytes []byte) {
 	for i := 0; i < 8; i++ {
@@ -32,7 +18,7 @@ func ByteToUint64(bytes []byte) (num uint64) {
 
 func Uint32ToByte(num uint32, bytes []byte) {
 	for i := 0; i < 4; i++ {
-		bytes[i] = byte(num >> uint((4 - i) * 8) & 0xff)
+		bytes[i] = byte(num >> uint((3 - i) * 8) & 0xff)
 	}
 }
 
@@ -50,4 +36,8 @@ func UintToByte(num uint, bytes []byte) {
 
 func ByteToInt(bytes []byte) uint {
 	return uint(ByteToUint32(bytes))
+}
+
+func CalcCrc32(bytes []byte) uint32 {
+	return crc32.ChecksumIEEE(bytes)
 }
