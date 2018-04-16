@@ -8,7 +8,7 @@ import (
 )
 
 func TestNewFilePartition(t *testing.T) {
-	part, err := NewFilePartition("G:\\test\\fqueue")
+	part, err := NewPartition()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,11 +28,15 @@ func TestNewFilePartition(t *testing.T) {
 	}
 }
 
+func NewPartition() (*FilePartition, error) {
+	return NewFilePartition(DefaultPartitionConfig(0, "temp-topic"))
+}
+
 func WriteMsg(t *testing.T, part *FilePartition, count int) {
 	for i := 0; i < count; i++ {
 		msg := NewMessage([]byte(fmt.Sprintf("this is a key - %d", i)), []byte(fmt.Sprintf("this is the value - %d", i)))
-		t.Log(msg)
 		err := part.WriteMsg(msg)
+		t.Log(msg)
 		NoError(err, t)
 	}
 }
@@ -79,7 +83,7 @@ func NoError(err error, t *testing.T) {
 }
 
 func BenchmarkFilePartition_WriteMsg(b *testing.B) {
-	part, err := NewFilePartition("G:\\test\\fqueue")
+	part, err := NewPartition()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -97,7 +101,7 @@ func BenchmarkFilePartition_WriteMsg(b *testing.B) {
 }
 
 func BenchmarkFilePartition_ReadMsg(b *testing.B) {
-	part, err := NewFilePartition("G:\\test\\fqueue")
+	part, err := NewPartition()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -115,7 +119,7 @@ func BenchmarkFilePartition_ReadMsg(b *testing.B) {
 }
 
 func BenchmarkFilePartition_ReadMsg2(b *testing.B) {
-	part, err := NewFilePartition("G:\\test\\fqueue")
+	part, err := NewPartition()
 	if err != nil {
 		b.Fatal(err)
 	}

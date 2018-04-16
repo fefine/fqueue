@@ -1,6 +1,10 @@
 package fqueue
 
-import "hash/crc32"
+import (
+	"hash/crc32"
+	"os/user"
+	"log"
+)
 
 func Uint64ToByte(num uint64, bytes []byte) {
 	for i := 0; i < 8; i++ {
@@ -40,4 +44,13 @@ func ByteToInt(bytes []byte) uint {
 
 func CalcCrc32(bytes []byte) uint32 {
 	return crc32.ChecksumIEEE(bytes)
+}
+
+// out: C:\Users\xxx or /home/xxx
+func HomePath() string {
+	usr, err := user.Current()
+	if err != nil {
+		log.Fatal("get home path error")
+	}
+	return usr.HomeDir
 }
