@@ -286,8 +286,8 @@ func (p *FilePartition) read(startPosition uint64, msg []byte) (err error) {
 	return
 }
 
-// 用来撤销上一次操作
-func (p *FilePartition) Rollback() {
+// 用来撤销上一次操作, 当读写同时进行时，不能保证撤销成功，因此不对外提供
+func (p *FilePartition) rollback() {
 	p.latestMsgOffset -= uint64(p.lastWriteMsgOffset)
 	p.msgWriter.Seek(int64(-p.lastWritePositionOffset), 1)
 	p.Index.rollback()
@@ -336,7 +336,7 @@ func (p *FilePartition) WriteMsg(msg *Msg) (err error) {
 	err = p.Index.WriteIndex(offset, uint64(position), length)
 	if err != nil {
 		// 当写入index错误时，其中的offset均为0，不需要rollback
-		p.Rollback()
+		p.rollback()
 	}
 	return
 }
@@ -363,7 +363,7 @@ func (p *FilePartition) WriteMultiMsg(msgs []*Msg) (err error) {
 	err = p.writeMulti(sources)
 	if err != nil {
 		p.Index.rollback()
-		p.Rollback()
+		p.rollback()
 	}
 	return
 }
@@ -379,6 +379,7 @@ func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 	return
 }
 
+// 当数量不够时，读取多少返回多少
 func (p *FilePartition) ReadMultiMsg(offset uint64, size uint32) (msgs [][]byte, err error) {
 	msgs = make([][]byte, size)
 	for i := 0; i < int(size); i++ {
@@ -405,7 +406,7 @@ func (p *FilePartition) Close() (err error) {
 
 func (p *FilePartition) recovery() (err error) {
 	offset, position, length, err := p.Index.recovery()
-	if err != nil {
+	if err != nil || (offset == 0 && position == 0 && length == 0) {
 		return
 	}
 	_, err = p.msgWriter.Seek(int64(position + uint64(length)), 0)
