@@ -49,7 +49,7 @@ type FilePartition struct {
 
 	msgMutex          sync.Mutex
 	// 最新消息的offset
-	latestMsgOffset   uint64
+	LatestMsgOffset uint64
 	// 最新写入位置
 	//latestPosition uint64
 	// 上一次写入的位置偏移量，用于rollback
@@ -274,7 +274,7 @@ func (p *FilePartition) writeMulti(msgs [][]byte) (err error) {
 		p.lastWritePositionOffset += uint(l)
 		p.lastWriteMsgOffset += 1
 		// index
-		p.Index.write(p.latestMsgOffset - 1, uint64(position), uint32(l))
+		p.Index.write(p.LatestMsgOffset- 1, uint64(position), uint32(l))
 		p.Index.lastWritePositionOffset += 20
 		position += int64(l)
 	}
@@ -288,7 +288,7 @@ func (p *FilePartition) read(startPosition uint64, msg []byte) (err error) {
 
 // 用来撤销上一次操作, 当读写同时进行时，不能保证撤销成功，因此不对外提供
 func (p *FilePartition) rollback() {
-	p.latestMsgOffset -= uint64(p.lastWriteMsgOffset)
+	p.LatestMsgOffset -= uint64(p.lastWriteMsgOffset)
 	p.msgWriter.Seek(int64(-p.lastWritePositionOffset), 1)
 	p.Index.rollback()
 }
@@ -304,7 +304,7 @@ func (p *FilePartition) WriteMsg(msg *Msg) (err error) {
 	p.lastWriteMsgOffset = 0
 
 	// offset这个时候生成
-	offset := p.latestMsgOffset
+	offset := p.LatestMsgOffset
 	position, _ := p.msgWriter.Seek(0, 1)
 	length := msg.Size
 	// 如果为0，认为并未提供offset，
@@ -331,7 +331,7 @@ func (p *FilePartition) WriteMsg(msg *Msg) (err error) {
 
 	p.lastWritePositionOffset = uint(uint(msg.Size))
 	p.lastWriteMsgOffset = 1
-	p.latestMsgOffset = offset + 1
+	p.LatestMsgOffset = offset + 1
 
 	err = p.Index.WriteIndex(offset, uint64(position), length)
 	if err != nil {
@@ -352,7 +352,7 @@ func (p *FilePartition) WriteMultiMsg(msgs []*Msg) (err error) {
 	// 先补上offset
 	if msgs[0].Offset == 0 {
 		for i, m := range msgs {
-			m.Offset = p.latestMsgOffset + uint64(i)
+			m.Offset = p.LatestMsgOffset + uint64(i)
 			Uint64ToByte(m.Offset, m.Source[:8])
 		}
 	}
@@ -410,13 +410,13 @@ func (p *FilePartition) recovery() (err error) {
 		return
 	}
 	_, err = p.msgWriter.Seek(int64(position + uint64(length)), 0)
-	p.latestMsgOffset = offset + 1
+	p.LatestMsgOffset = offset + 1
 	log.Logf("[recovery] offset: %d, position: %d", offset, position)
 	return
 }
 
 func (p *FilePartition) String() string {
 	return fmt.Sprintf("FilePartition: {" +
-		"id: %d, latestMsgOffset: %d, lastMsgOffset: %d, lastPositionOffset: %d, Index: %v}",
-			p.Id, p.latestMsgOffset, p.lastWriteMsgOffset, p.lastWritePositionOffset, p.Index)
+		"id: %d, LatestMsgOffset: %d, lastMsgOffset: %d, lastPositionOffset: %d, Index: %v}",
+			p.Id, p.LatestMsgOffset, p.lastWriteMsgOffset, p.lastWritePositionOffset, p.Index)
 }

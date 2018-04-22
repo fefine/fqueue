@@ -8,7 +8,7 @@ import (
 )
 
 func NewPartition() (*FilePartition, error) {
-	return NewFilePartition(DefaultPartitionConfig(0, "temp-topic"))
+	return NewFilePartition(DefaultPartitionConfig(uint(rand.Uint32()), "temp-topic"))
 }
 
 func NoError(t *testing.T, err error) {
@@ -80,4 +80,17 @@ func TestNewFilePartition(t *testing.T) {
 	ReadMsg(t, part, 0, 100)
 	ReadMsg(t, part, 100, 100)
 	ReadMultiMsg(t, part, 0, 200)
+}
+
+func TestMultiPartition(t *testing.T)  {
+	signalChan := make(chan int, 5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			TestNewFilePartition(t)
+			signalChan <- 1
+		}()
+	}
+	for range "00000"{
+		<- signalChan
+	}
 }
