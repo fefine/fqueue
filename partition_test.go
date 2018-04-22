@@ -7,6 +7,15 @@ import (
 	"io"
 )
 
+
+func DefaultPartitionConfig(id uint, topic string) *PartitionConfig {
+	return &PartitionConfig{
+		Id: id,
+		Topic: topic,
+		DataPath: HomePath() + "/fqueue",
+	}
+}
+
 func NewPartition() (*FilePartition, error) {
 	return NewFilePartition(DefaultPartitionConfig(uint(rand.Uint32()), "temp-topic"))
 }

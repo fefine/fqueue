@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/go-log/log"
 	"errors"
-	"math/rand"
 )
 
 const (
@@ -85,22 +84,16 @@ type PartitionConfig struct {
 	DataPath    string
 }
 
-func DefaultPartitionConfig(id uint, topic string) *PartitionConfig {
-	return &PartitionConfig{
-		Id: id,
-		Topic: topic,
-		DataPath: HomePath() + "/fqueue",
-    }
-}
 
-// TODO 当第二次启动时应先读取偏移量(在文件中保存)， 保存index和msg的最新位置和索引
+// TODO 增加file lock，防止冲突
 func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 	fp = new(FilePartition)
 
 	if config == nil {
-		id := rand.Uint32()
-		config = DefaultPartitionConfig(uint(id), "temp-topic")
+		panic(errors.New("not found configuration file"))
 	}
+
+	fp.Id = config.Id
 
 	// 创建文件夹
 	path := fmt.Sprintf("%s/%s/partition-%d", config.DataPath, config.Topic,  config.Id)
