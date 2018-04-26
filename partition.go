@@ -5,7 +5,7 @@ import (
 	"golang.org/x/exp/mmap"
 	"os"
 	"fmt"
-	"github.com/go-log/log"
+	log "github.com/sirupsen/logrus"
 	"errors"
 )
 
@@ -44,7 +44,7 @@ type Index interface {
 // 需要写入消息，获取消息
 // 不支持切换文件
 type FilePartition struct {
-	Id                uint
+	Id                uint32
 
 	Index             *FileIndex
 
@@ -54,9 +54,9 @@ type FilePartition struct {
 	// 最新写入位置
 	//latestPosition uint64
 	// 上一次写入的位置偏移量，用于rollback
-	lastWritePositionOffset   uint
+	lastWritePositionOffset   uint32
 	// 上一次写入消息offset的偏移量， 用于rollback
-	lastWriteMsgOffset uint
+	lastWriteMsgOffset uint32
 
 	msgWriter         *os.File
 	// reader
@@ -73,7 +73,7 @@ type FileIndex struct {
 	// 最后写入索引的位置
 	//latestPosition uint64
 	// 上一次写入的偏移量
-	lastWritePositionOffset uint
+	lastWritePositionOffset uint32
 	// writer
 	indexWriter       *os.File
 
@@ -81,7 +81,7 @@ type FileIndex struct {
 }
 
 type PartitionConfig struct {
-	Id          uint
+	Id          uint32
 	Topic       string
 	DataPath    string
 }
@@ -105,27 +105,27 @@ func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 	err = os.MkdirAll(path, 0755)
 
 	if err != nil {
-		log.Logf("create partition dir failed: %v", err)
+		log.Errorf("create partition dir failed: %v", err)
 		return
 	}
 	// msg
 	msgFileName := fmt.Sprintf("%s.%s", name, MsgFilePostfix)
 	if _, err := os.Stat(msgFileName); os.IsNotExist(err) {
 		if _, err = os.Create(msgFileName); err != nil {
-			log.Logf("create msg file %s failed, error: %v)", msgFileName, err)
+			log.Errorf("create msg file %s failed, error: %v)", msgFileName, err)
 			return nil, err
 		}
 	}
 	fp.msgWriter, err = os.OpenFile(msgFileName, os.O_WRONLY | os.O_APPEND, 0755)
 	if err != nil {
-		log.Logf("open msg write file error: %v", err)
+		log.Errorf("open msg write file error: %v", err)
 		return
 	}
 
 	// 当文件未创建的时候，会报错
 	fp.msgReader, err = mmap.Open(msgFileName)
 	if err != nil {
-		log.Logf("open mmap msg read file error: %v", err)
+		log.Errorf("open mmap msg read file error: %v", err)
 		return
 	}
 
@@ -135,13 +135,13 @@ func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 
 	fp.Index.indexWriter, err = os.OpenFile(indexFileName, os.O_CREATE | os.O_WRONLY | os.O_APPEND, 0755);
 	if err != nil {
-		log.Logf("open index write file error: %v", err)
+		log.Errorf("open index write file error: %v", err)
 		return
 	}
 
 	fp.Index.indexReader, err = os.OpenFile(indexFileName, os.O_CREATE | os.O_RDONLY, 0755);
 	if err != nil {
-		log.Logf("open index read file error: %v", err)
+		log.Errorf("open index read file error: %v", err)
 		return
 	}
 
@@ -266,7 +266,7 @@ func (p *FilePartition) writeMulti(msgs [][]byte) (err error) {
 			return err
 		}
 		p.lastWriteMsgOffset += 1
-		p.lastWritePositionOffset += uint(l)
+		p.lastWritePositionOffset += uint32(l)
 		p.lastWriteMsgOffset += 1
 		// index
 		p.Index.write(p.LatestMsgOffset- 1, uint64(position), uint32(l))
@@ -324,7 +324,7 @@ func (p *FilePartition) WriteMsg(msg *Msg) (err error) {
 		return
 	}
 
-	p.lastWritePositionOffset = uint(uint(msg.Size))
+	p.lastWritePositionOffset = msg.Size
 	p.lastWriteMsgOffset = 1
 	p.LatestMsgOffset = offset + 1
 
@@ -421,7 +421,7 @@ func (p *FilePartition) recovery() (err error) {
 	}
 	_, err = p.msgWriter.Seek(int64(position + uint64(length)), 0)
 	p.LatestMsgOffset = offset + 1
-	log.Logf("[recovery] offset: %d, position: %d", offset, position)
+	log.Errorf("[recovery] offset: %d, position: %d", offset, position)
 	return
 }
 

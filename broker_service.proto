@@ -49,6 +49,20 @@ message PullReq {
     TopicPartitionOffset tpSet = 3;
 }
 
+message CreateTopicReq {
+    string topic = 1;
+    uint32 partitionCount = 2;
+    uint32 replicaCount = 3;
+}
+
+message AssignTopicReq {
+    string topic = 1;
+    // 需要新建的分区 eg: [1, 3, 4]
+    repeated uint32 partitions = 2;
+    // 由接收此消息的broker做leader的partition, eg: [1, 4]
+    repeated uint32 leaderPartitions = 3;
+}
+
 message TopicPartition {
     string topic = 1;
     repeated uint32 partition = 2;
@@ -75,18 +89,23 @@ enum RespStatus {
 service BrokerService {
     // broker
     // append from other broker
-    rpc Append(stream MsgBatch) returns (Resp) {}
+    rpc Append (stream MsgBatch) returns (Resp) {}
     // get msg
-    rpc Get(GetReq) returns (GetResp) {}
+    rpc Get (GetReq) returns (GetResp) {}
 
     // producer
-    rpc Push(stream MsgBatch) returns (Resp) {}
+    rpc Push (stream MsgBatch) returns (Resp) {}
+    // 创建分区
+    rpc CreateTopic (CreateTopicReq) returns (Resp) {}
+    // 分配分区
+    rpc AssignTopic (AssignTopicReq) returns (Resp) {}
 
     // consumer
-    rpc Subscribe(SubReq) returns (SubResp) {}
-
-    rpc Pull(PullReq) returns (stream MsgBatch) {}
-//    rpc SeekToEnd(TopicPatition) returns (Resp) {}
-//    rpc SeekToBegin(TopicPatition) returns (Resp) {}
-//    rpc Seek(TopicPatitionOffset) returns (Resp) {}
+    // subscribe topics
+    rpc Subscribe (SubReq) returns (SubResp) {}
+    // Producer pull msg
+    rpc Pull (PullReq) returns (stream MsgBatch) {}
+    //    rpc SeekToEnd(TopicPatition) returns (Resp) {}
+    //    rpc SeekToBegin(TopicPatition) returns (Resp) {}
+    //    rpc Seek(TopicPatitionOffset) returns (Resp) {}
 }

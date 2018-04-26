@@ -1,7 +1,7 @@
 package fqueue
 
 import (
-	"github.com/go-log/log"
+	log "github.com/sirupsen/logrus"
 	"io"
 	"errors"
 )
@@ -13,34 +13,34 @@ const (
 // 负责发送和接收
 type Topic interface {
 	// 写到指定的分区
-	Write(msg *Msg, partition uint) error
+	Write(msg *Msg, partition uint32) error
 	// 批量写入同一分区，保证同时写入成功或者同时失败
-	WriteMulti(msgs []*Msg, partition uint) error
+	WriteMulti(msgs []*Msg, partition uint32) error
 	// 读取单条消息
-	Read(offset uint64, partition uint) ([]byte, error)
+	Read(offset uint64, partition uint32) ([]byte, error)
 	// 批量读取
-	ReadMulti(offset uint64, partition uint, count uint32) ([][]byte, int)
+	ReadMulti(offset uint64, partition, count uint32) ([][]byte, int)
 
-	OffsetLag(offset uint64, partition uint) uint64
+	OffsetLag(offset uint64, partition uint32) uint64
 
 	Close() error
 }
 
 type FileTopic struct {
 	Name            string
-	PartitionIds    []uint
-	PartitionNumber uint
-	Partitions      map[uint]*FilePartition
+	PartitionIds    []uint32
+	PartitionNumber uint32
+	Partitions      map[uint32]*FilePartition
 	// 存放，可能没用
 	//MsgChan         []chan *Msg
 	// 一次读取的数量
-	BatchCount      uint
+	BatchCount      uint32
 }
 
 type TopicConfig struct {
 	Name            string
-	PartitionIds    []uint
-	BatchCount      uint
+	PartitionIds    []uint32
+	BatchCount      uint32
 	BasePath        string
 }
 
@@ -53,7 +53,7 @@ func NewFileTopic(config *TopicConfig) (ft *FileTopic, err error) {
 	ft = new(FileTopic)
 	ft.Name = config.Name
 	ft.PartitionIds = config.PartitionIds
-	ft.PartitionNumber = uint(len(ft.PartitionIds))
+	ft.PartitionNumber = uint32(len(ft.PartitionIds))
 	ft.BatchCount = config.BatchCount
 	basePath := config.BasePath
 
@@ -61,14 +61,14 @@ func NewFileTopic(config *TopicConfig) (ft *FileTopic, err error) {
 		Topic:    ft.Name,
 		DataPath: basePath,
 	}
-	ft.Partitions = make(map[uint]*FilePartition, ft.PartitionNumber)
+	ft.Partitions = make(map[uint32]*FilePartition, ft.PartitionNumber)
 	for _, id := range ft.PartitionIds {
 		partitionConfig.Id = id
-		log.Logf("[%s] partition: %v", ft.Name, partitionConfig)
+		log.Errorf("[%s] partition: %v", ft.Name, partitionConfig)
 		part, err := NewFilePartition(partitionConfig)
 		ft.Partitions[id] = part
 		if err != nil {
-			log.Logf("start topic error: %v", err)
+			log.Errorf("start topic error: %v", err)
 			goto CLOSE
 		}
 	}
@@ -78,7 +78,7 @@ func NewFileTopic(config *TopicConfig) (ft *FileTopic, err error) {
 
 	return
 CLOSE:
-	log.Log("close already start filePartitions")
+	log.Info("close already start filePartitions")
 	for _, fp := range ft.Partitions {
 		if fp != nil {
 			fp.Close()
@@ -87,7 +87,7 @@ CLOSE:
 	return
 }
 
-func (ft *FileTopic) checkPartition(partition uint) error {
+func (ft *FileTopic) checkPartition(partition uint32) error {
 	if _, ok := ft.Partitions[partition]; !ok {
 		return errors.New("wrong partition")
 	}
@@ -95,21 +95,21 @@ func (ft *FileTopic) checkPartition(partition uint) error {
 }
 
 // 写到指定的分区
-func (ft *FileTopic) Write(msg *Msg, partition uint) (err error) {
+func (ft *FileTopic) Write(msg *Msg, partition uint32) (err error) {
 	if err := ft.checkPartition(partition); err != nil {
 		return err
 	}
 	return ft.Partitions[partition].WriteMsg(msg)
 }
 // 批量写入同一分区，保证同时写入成功或者同时失败
-func (ft *FileTopic) WriteMulti(msgs []*Msg, partition uint) error {
+func (ft *FileTopic) WriteMulti(msgs []*Msg, partition uint32) error {
 	if err := ft.checkPartition(partition); err != nil {
 		return err
 	}
 	return ft.Partitions[partition].WriteMultiMsg(msgs)
 }
 // 读取单条消息
-func (ft *FileTopic) Read(offset uint64, partition uint) ([]byte, error) {
+func (ft *FileTopic) Read(offset uint64, partition uint32) ([]byte, error) {
 	if err := ft.checkPartition(partition); err != nil {
 		return nil, err
 	}
@@ -117,7 +117,7 @@ func (ft *FileTopic) Read(offset uint64, partition uint) ([]byte, error) {
 }
 
 // 批量读取
-func (ft *FileTopic) ReadMulti(offset uint64, partition uint, count uint32) ([][]byte, int) {
+func (ft *FileTopic) ReadMulti(offset uint64, partition, count uint32) ([][]byte, int) {
 	if err := ft.checkPartition(partition); err != nil {
 		return nil, 0
 	}
@@ -135,7 +135,7 @@ func (ft *FileTopic) ReadMulti(offset uint64, partition uint, count uint32) ([][
 	return sourceMsg, len(sourceMsg)
 }
 
-func (ft *FileTopic) OffsetLag(offset uint64, partition uint) (lag uint64) {
+func (ft *FileTopic) OffsetLag(offset uint64, partition uint32) (lag uint64) {
 	if err := ft.checkPartition(partition); err != nil {
 		return 0
 	}

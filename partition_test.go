@@ -8,7 +8,7 @@ import (
 )
 
 
-func DefaultPartitionConfig(id uint, topic string) *PartitionConfig {
+func DefaultPartitionConfig(id uint32, topic string) *PartitionConfig {
 	return &PartitionConfig{
 		Id: id,
 		Topic: topic,
@@ -17,7 +17,7 @@ func DefaultPartitionConfig(id uint, topic string) *PartitionConfig {
 }
 
 func NewPartition() (*FilePartition, error) {
-	return NewFilePartition(DefaultPartitionConfig(uint(rand.Uint32()), "temp-topic"))
+	return NewFilePartition(DefaultPartitionConfig(rand.Uint32(), "temp-topic"))
 }
 
 func NoError(t *testing.T, err error) {
@@ -39,6 +39,17 @@ func BuildMultiMsg(t *testing.T, size, count int) (msgs []*Msg) {
 		}
 		msg := NewMessage([]byte(fmt.Sprintf("this is a key - %d", i)), value)
 		msgs = append(msgs, msg)
+	}
+	return
+}
+func BuildMultiByteMsg(t *testing.T, size, count int) (msgs [][]byte) {
+	msgs = make([][]byte, 0, count)
+	for i := 0; i < count; i++ {
+		value := make([]byte, size)
+		for j := 0; j < size; j++ {
+			value[j] = '0' + byte(rand.Int() % 10)
+		}
+		msgs = append(msgs, value)
 	}
 	return
 }
