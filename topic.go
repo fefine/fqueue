@@ -123,17 +123,14 @@ func (ft *FileTopic) ReadMulti(offset uint64, partition uint, count uint32) ([][
 	}
 	part := ft.Partitions[partition]
 	sourceMsg, err := part.ReadMultiMsg(offset, count)
-	if err != nil {
-		if err == io.EOF {
-			// 判断长度，小于一半就重新构建slice，否则直接返回
-			if len(sourceMsg) < cap(sourceMsg) / 2 {
-				newSourceMsg := make([][]byte, 0, len(sourceMsg))
-				copy(newSourceMsg, sourceMsg)
-				sourceMsg = newSourceMsg
-			}
-		} else {
-			return nil, 0
-		}
+	if err != nil && err != io.EOF{
+		return nil, 0
+	}
+	// 判断长度，小于一半就重新构建slice，否则直接返回
+	if len(sourceMsg) < cap(sourceMsg) / 2 {
+		newSourceMsg := make([][]byte, 0, len(sourceMsg))
+		copy(newSourceMsg, sourceMsg)
+		sourceMsg = newSourceMsg
 	}
 	return sourceMsg, len(sourceMsg)
 }
@@ -142,7 +139,7 @@ func (ft *FileTopic) OffsetLag(offset uint64, partition uint) (lag uint64) {
 	if err := ft.checkPartition(partition); err != nil {
 		return 0
 	}
-	return ft.Partitions[partition].LatestMsgOffset - offset
+	return ft.Partitions[partition].OffsetLag(offset)
 }
 
 func (ft *FileTopic) Close() (err error) {

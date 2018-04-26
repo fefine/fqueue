@@ -1,0 +1,92 @@
+syntax = "proto3";
+package fqueue;
+
+// 对内
+// 1, 接收Append消息,使用stream
+// 2, 接收Get消息,获取缺失的消息
+
+// 一次发送单个分区的多个消息
+message MsgBatch {
+    string topic = 1;
+    uint32 partition = 2;
+    uint64 startOffset = 3;
+    repeated bytes msgs = 4;
+}
+
+// 获取缺失的消息
+message GetReq {
+    string topic = 1;
+    uint32 partition = 2;
+    uint64 startOffset = 3;
+}
+
+// get请求的resp
+message GetResp {
+    Resp resp = 1;
+    MsgBatch msgs = 2;
+    // 如果跟上, 则不用继续发get
+    bool enough = 3;
+}
+
+// 订阅, 默认从最新位置开始读取
+message SubReq {
+    repeated string topics = 1;
+    string cousumerGroup = 2;
+    string consumerId = 3;
+}
+
+message SubResp {
+    Resp resp = 1;
+    // 分配给它的topic, partition
+    repeated TopicPartition topicPartitions = 2;
+}
+
+message PullReq {
+    uint32 count = 1;
+    // 超时时间, ms, <=0代表立即返回
+    int64 timeout = 2;
+    // 这些信息由客户端存储
+    TopicPartitionOffset tpSet = 3;
+}
+
+message TopicPartition {
+    string topic = 1;
+    repeated uint32 partition = 2;
+}
+
+message TopicPartitionOffset {
+    string topic = 1;
+    // partition, offset
+    map<uint32, uint64> partitionOffset = 2;
+}
+
+message Resp {
+    RespStatus status = 1;
+    string comment = 2;
+}
+
+// 响应的状态
+enum RespStatus {
+    OK = 0;
+    ERROR = 1;
+}
+
+
+service BrokerService {
+    // broker
+    // append from other broker
+    rpc Append(stream MsgBatch) returns (Resp) {}
+    // get msg
+    rpc Get(GetReq) returns (GetResp) {}
+
+    // producer
+    rpc Push(stream MsgBatch) returns (Resp) {}
+
+    // consumer
+    rpc Subscribe(SubReq) returns (SubResp) {}
+
+    rpc Pull(PullReq) returns (stream MsgBatch) {}
+//    rpc SeekToEnd(TopicPatition) returns (Resp) {}
+//    rpc SeekToBegin(TopicPatition) returns (Resp) {}
+//    rpc Seek(TopicPatitionOffset) returns (Resp) {}
+}

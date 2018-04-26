@@ -26,6 +26,8 @@ type Partition interface {
 
 	ReadMultiMsg(uint64, uint32) ([][]byte, error)
 
+	OffsetLag(uint64) uint64
+
 }
 
 type Index interface {
@@ -87,12 +89,12 @@ type PartitionConfig struct {
 
 // TODO 增加file lock，防止冲突
 func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
-	fp = new(FilePartition)
 
 	if config == nil {
 		panic(errors.New("not found configuration file"))
 	}
 
+	fp = new(FilePartition)
 	fp.Id = config.Id
 
 	// 创建文件夹
@@ -361,6 +363,21 @@ func (p *FilePartition) WriteMultiMsg(msgs []*Msg) (err error) {
 	return
 }
 
+func (p *FilePartition) WriteMultiMsgByBytes(msgs [][]byte) (err error) {
+	if len(msgs) <= 0 {
+		return
+	}
+
+	p.msgMutex.Lock()
+	defer p.msgMutex.Unlock()
+	err = p.writeMulti(msgs)
+	if err != nil {
+		p.Index.rollback()
+		p.rollback()
+	}
+	return
+}
+
 // 读取指定offset的数据
 func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 	position, length, err := p.Index.Position(offset)
@@ -406,6 +423,10 @@ func (p *FilePartition) recovery() (err error) {
 	p.LatestMsgOffset = offset + 1
 	log.Logf("[recovery] offset: %d, position: %d", offset, position)
 	return
+}
+
+func (p *FilePartition) OffsetLag(offset uint64) uint64 {
+	return p.LatestMsgOffset - offset
 }
 
 func (p *FilePartition) String() string {
