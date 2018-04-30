@@ -64,7 +64,7 @@ func NewFileTopic(config *TopicConfig) (ft *FileTopic, err error) {
 	ft.Partitions = make(map[uint32]*FilePartition, ft.PartitionNumber)
 	for _, id := range ft.PartitionIds {
 		partitionConfig.Id = id
-		log.Errorf("[%s] partition: %v", ft.Name, partitionConfig)
+		log.Infof("[%s] partition: %v", ft.Name, partitionConfig)
 		part, err := NewFilePartition(partitionConfig)
 		ft.Partitions[id] = part
 		if err != nil {
@@ -72,10 +72,7 @@ func NewFileTopic(config *TopicConfig) (ft *FileTopic, err error) {
 			goto CLOSE
 		}
 	}
-
-	// 这里创建goroutine专门往chan中放消息
-
-
+	log.Debugf("create topic %v success", ft)
 	return
 CLOSE:
 	log.Info("close already start filePartitions")
@@ -105,6 +102,18 @@ func (ft *FileTopic) Write(msg *Msg, partition uint32) (err error) {
 func (ft *FileTopic) WriteMulti(msgs []*Msg, partition uint32) error {
 	if err := ft.checkPartition(partition); err != nil {
 		return err
+	}
+	return ft.Partitions[partition].WriteMultiMsg(msgs)
+}
+
+// 批量写入同一分区，保证同时写入成功或者同时失败
+func (ft *FileTopic) WriteMultiBytes(bytes [][]byte, partition uint32) error {
+	if err := ft.checkPartition(partition); err != nil {
+		return err
+	}
+	msgs := make([]*Msg, len(bytes))
+	for i, b := range bytes {
+		msgs[i] = NewMessageFromSource(b)
 	}
 	return ft.Partitions[partition].WriteMultiMsg(msgs)
 }
@@ -144,11 +153,8 @@ func (ft *FileTopic) OffsetLag(offset uint64, partition uint32) (lag uint64) {
 
 func (ft *FileTopic) Close() (err error) {
 	for _, p := range ft.Partitions {
-		err = p.Close()
-		// TODO 待改进
-		if err != nil {
-			return
-		}
+		p.Close()
 	}
+	log.Infof("topic %v close", ft)
 	return
 }

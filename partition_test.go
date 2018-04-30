@@ -42,17 +42,6 @@ func BuildMultiMsg(t *testing.T, size, count int) (msgs []*Msg) {
 	}
 	return
 }
-func BuildMultiByteMsg(t *testing.T, size, count int) (msgs [][]byte) {
-	msgs = make([][]byte, 0, count)
-	for i := 0; i < count; i++ {
-		value := make([]byte, size)
-		for j := 0; j < size; j++ {
-			value[j] = '0' + byte(rand.Int() % 10)
-		}
-		msgs = append(msgs, value)
-	}
-	return
-}
 
 func WriteMsg(t *testing.T, part *FilePartition, count, size int) {
 	msgs := BuildMultiMsg(t, count, size)

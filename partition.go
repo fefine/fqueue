@@ -147,6 +147,8 @@ func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 
 	fp.recovery()
 
+	log.Debugf("create partition: %v success", fp)
+
 	return
 }
 
@@ -269,9 +271,10 @@ func (p *FilePartition) writeMulti(msgs [][]byte) (err error) {
 		p.lastWritePositionOffset += uint32(l)
 		p.lastWriteMsgOffset += 1
 		// index
-		p.Index.write(p.LatestMsgOffset- 1, uint64(position), uint32(l))
+		p.Index.write(p.LatestMsgOffset, uint64(position), uint32(l))
 		p.Index.lastWritePositionOffset += 20
 		position += int64(l)
+		p.LatestMsgOffset += 1
 	}
 	return
 }
@@ -363,20 +366,6 @@ func (p *FilePartition) WriteMultiMsg(msgs []*Msg) (err error) {
 	return
 }
 
-func (p *FilePartition) WriteMultiMsgByBytes(msgs [][]byte) (err error) {
-	if len(msgs) <= 0 {
-		return
-	}
-
-	p.msgMutex.Lock()
-	defer p.msgMutex.Unlock()
-	err = p.writeMulti(msgs)
-	if err != nil {
-		p.Index.rollback()
-		p.rollback()
-	}
-	return
-}
 
 // 读取指定offset的数据
 func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
@@ -403,14 +392,9 @@ func (p *FilePartition) ReadMultiMsg(offset uint64, size uint32) (msgs [][]byte,
 
 func (p *FilePartition) Close() (err error) {
 	err = p.Index.Close()
-	if err != nil {
-		return
-	}
-	err = p.msgReader.Close()
-	if err != nil {
-		return
-	}
+	p.msgReader.Close()
 	err = p.msgWriter.Close()
+	log.Infof("partition %v close", p)
 	return
 }
 
@@ -421,7 +405,7 @@ func (p *FilePartition) recovery() (err error) {
 	}
 	_, err = p.msgWriter.Seek(int64(position + uint64(length)), 0)
 	p.LatestMsgOffset = offset + 1
-	log.Errorf("[recovery] offset: %d, position: %d", offset, position)
+	log.Infof("[recovery] offset: %d, position: %d", offset, position)
 	return
 }
 

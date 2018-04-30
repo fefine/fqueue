@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"time"
+	"sync"
 )
 
 const (
 	MAX_SEND_COUNT = 1000
+	DEFAULT_CHAN_COUNT = 10
 )
 
 
@@ -51,15 +53,23 @@ type Broker struct {
 	// goroutine msg chan
 	partitionMsgChan map[string]chan *MsgBatch
 	// 其他的broker, 加锁
-	brokerClients   map[string]BrokerServiceClient
+	brokerClients   map[string]*BrokerMember
+	brokerClientsMutex sync.Mutex
 	// 每个partition关联的broker, brokers用[]client表示, 加锁
-	partitionBrokers map[string][]BrokerServiceClient
+	// 换成brokerName方便查询
+	partitionBrokers map[string][]string
+	partitionBrokersMutex sync.Mutex
 	// 以此broker为partitionLeader的分区, 怎么做到内存可见, 加锁
 	leaderPartitions map[string]bool
+	leaderPartitionsMutex sync.Mutex
 	// 以此broker为partitionLeader的分区数
 	leaderPartitionCount uint
+}
 
-
+type BrokerMember struct {
+	name            string
+	listenerAddress string
+	client          BrokerServiceClient
 }
 
 func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
@@ -72,9 +82,14 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 	broker.DataPath = config.DataPath
 	broker.EtcdEndPoints = config.EtcdEndPoints
 	broker.DataPath = config.DataPath
-	broker.AppendMsgChan = make(chan *MsgBatch)
+	broker.AppendMsgChan = make(chan *MsgBatch, DEFAULT_CHAN_COUNT)
 	broker.Topics = make(map[string]*FileTopic)
-	broker.brokerClients = make(map[string]BrokerServiceClient)
+	broker.brokerClients = make(map[string]*BrokerMember)
+	broker.partitionMsgChan = make(map[string]chan *MsgBatch)
+	broker.partitionBrokers = make(map[string][]string)
+	broker.ErrorChan = make(chan error, DEFAULT_CHAN_COUNT)
+	broker.cancelFuncs = make([]context.CancelFunc, 10)
+	broker.leaderPartitions = make(map[string]bool)
 	if config.Debug {
 		log.SetLevel(log.DebugLevel)
 	} else {
@@ -90,7 +105,7 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 	// 这里可以用加密, 暂不提供
 	grpcServer := grpc.NewServer()
 	RegisterBrokerServiceServer(grpcServer, NewBrokerServerServer(broker, broker.AppendMsgChan))
-	log.Info("rpc server start!")
+	log.Infof("broker {%s} rpc server start!", broker.Name)
 
 	go grpcServer.Serve(rpcLis)
 
@@ -99,7 +114,7 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 
 	go broker.appendMsgService(appendCtx)
 	// TODO 2, connect etcd, recovery broker info
-	log.Info("broker start!")
+	log.Infof("broker {%s} start!", broker.Name)
 	return
 }
 
@@ -108,8 +123,12 @@ func (broker *Broker) appendMsgService(ctx context.Context) {
 	for {
 		select {
 		case msgBatch := <- broker.AppendMsgChan:
-			// TODO 每个topic下的每个partition生成一个goroutine
-			broker.dispatcherMsg(msgBatch)
+			//key := GeneratorKey(msgBatch.Topic, msgBatch.Partition)
+			//if contain, ok := broker.leaderPartitions[key]; ok && contain {
+				broker.dispatcherMsg(msgBatch)
+			//} else {
+			//	log.Errorf("broker %s not lead topic %s-%d", broker.Name, msgBatch.Topic, msgBatch.Partition)
+			//}
 		case <- ctx.Done():
 			log.Info("append msg server stop")
 			return
@@ -127,10 +146,11 @@ func (broker *Broker) dispatcherMsg(batch *MsgBatch) {
 		ch <- batch
 	} else {
 		// 并不存在
-		msgChan := make(chan *MsgBatch)
+		msgChan := make(chan *MsgBatch, DEFAULT_CHAN_COUNT)
 		ctx, cancelFunc := context.WithCancel(context.Background())
 		broker.partitionMsgChan[key] = msgChan
 		broker.cancelFuncs = append(broker.cancelFuncs, cancelFunc)
+		msgChan <- batch
 		go broker.appendMsg(msgChan, ctx)
 	}
 }
@@ -142,16 +162,20 @@ func (broker *Broker) appendMsg(msgChan chan *MsgBatch, ctx context.Context) {
 		case batch := <- msgChan:
 			topic := batch.Topic
 			partition := batch.Partition
-			err := broker.Topics[topic].Partitions[partition].WriteMultiMsgByBytes(batch.Msgs)
+			log.Debugf("topic: %s part: %d recv: %d", topic, partition, len(batch.Msgs))
+			err := broker.Topics[topic].WriteMultiBytes(batch.Msgs, partition)
 			if err != nil {
+				log.Error(err)
 				broker.ErrorChan <- err
 			}
 			// 如果append失败怎么办?
 			err = broker.appendToSlaveBroker(batch)
 			if err != nil {
+				log.Error(err)
 				broker.ErrorChan <- err
 			}
 		case <- ctx.Done():
+			log.Info("append msg exit, err: ", ctx.Err())
 			// 退出
 			return
 		}
@@ -161,25 +185,27 @@ func (broker *Broker) appendMsg(msgChan chan *MsgBatch, ctx context.Context) {
 // 发送给此包含此partition的其他broker
 func (broker *Broker) appendToSlaveBroker(batch *MsgBatch) error {
 	key := GeneratorKey(batch.Topic, batch.Partition)
-	if clients, ok := broker.partitionBrokers[key]; ok {
-		for _, client := range clients {
+	if clientNames, ok := broker.partitionBrokers[key]; ok {
+		for _, clientName := range clientNames {
+			log.Debugf("append log to broker %s, key %s", clientName, key)
+			client := broker.brokerClients[clientName].client
 			appendClient, err := client.Append(context.TODO())
 			if err != nil {
-				log.Errorf("[append] get client error")
+				log.Error("[append] get client error")
 				continue
 			}
 			err = appendClient.Send(batch)
 			if err != nil {
-				log.Errorf("[append] send error")
+				log.Error("[append] send error")
 				continue
 			}
 			resp, err := appendClient.CloseAndRecv()
 			if err != nil {
-				log.Errorf("[append] close error")
+				log.Error("[append] close error")
 				continue
 			}
 			if resp.Status == RespStatus_ERROR {
-				log.Errorf("[append] append resp error")
+				log.Error("[append] append resp error")
 				continue
 			}
 		}
@@ -188,7 +214,7 @@ func (broker *Broker) appendToSlaveBroker(batch *MsgBatch) error {
 }
 
 func (broker *Broker) createTopic(t string, assignPartitions, leadPartitions []uint32) (err error) {
-	log.Info("create topic %s, partitions: %v, lead: %v", t, assignPartitions, leadPartitions)
+	log.Infof("create topic %s, partitions: %v, lead: %v", t, assignPartitions, leadPartitions)
 	topicConfig := &TopicConfig{
 		Name:t,
 		PartitionIds:assignPartitions,
@@ -196,12 +222,98 @@ func (broker *Broker) createTopic(t string, assignPartitions, leadPartitions []u
 		BasePath:broker.DataPath}
 	topic, err := NewFileTopic(topicConfig)
 	if err != nil {
-		log.Infof("create topic %s error", t)
+		log.Errorf("create topic %s error", t)
 		return
 	}
 	broker.Topics[t] = topic
+	for _, v := range leadPartitions {
+		broker.leaderPartitions[GeneratorKey(t, v)] = true
+	}
 	// TODO 1, 把leader partition发布到etcd, 然后放到leadPartition中
 	return
+}
+
+// 1，brokerClients上添加此broker
+// 2，找到此broker上存在的partition
+// 3. 找到此broker上leader的partition
+func (broker *Broker) AddBrokerMember(config *BrokerConfig) (err error) {
+	log.Debug("add new broker %s %s", config.Name, config.ListenerAddress)
+	if config == nil {
+		log.Error("not found broker configuration")
+		return errors.New("not found broker configuration")
+	}
+	broker.brokerClientsMutex.Lock()
+	defer broker.brokerClientsMutex.Unlock()
+	conn, err := grpc.Dial(config.ListenerAddress, grpc.WithInsecure())
+	if err != nil {
+		return
+	}
+	brokerClient := NewBrokerServiceClient(conn)
+	broker.brokerClients[config.Name] = &BrokerMember{client:brokerClient, name: config.Name, listenerAddress: config.ListenerAddress}
+	return
+}
+
+// 移除broker
+func (broker *Broker) RemoveBroker(config *BrokerConfig) (err error) {
+	log.Debug("remove broker %s", config.Name)
+	if config == nil {
+		log.Error("not found broker configuration")
+		return errors.New("not found broker configuration")
+	}
+	broker.brokerClientsMutex.Lock()
+	defer broker.brokerClientsMutex.Unlock()
+	delete(broker.brokerClients, config.Name)
+	return
+}
+// 更新分区leader
+// broker并不会保存所有partition的leader， 仅仅保存自己leader的partition
+// 当其他broker lost, 自己变成分区leader的时候会调用
+func (broker *Broker) UpdatePartitionLeader(partitions TopicPartition) {
+	broker.leaderPartitionsMutex.Lock()
+	defer broker.leaderPartitionsMutex.Unlock()
+	for _, p := range partitions.Partition {
+		key := GeneratorKey(partitions.GetTopic(), p)
+		broker.leaderPartitions[key] = true
+	}
+}
+// 更新partition关联的broker, 即包含此partition的所有broker
+// 1，当broker添加或者lost的时候； 2， 当新建partition的时候
+// add=true增加broker， false减少
+func (broker *Broker) UpdatePartitionBrokers(partitions TopicPartition, newBroker string, add bool) {
+	log.Debugf("update topic %s partition %v broker %s add: %v", partitions.Topic, partitions.Partition, newBroker, add)
+	broker.partitionBrokersMutex.Lock()
+	defer broker.partitionBrokersMutex.Unlock()
+
+	if add {
+		for _, p := range partitions.Partition {
+			key := GeneratorKey(partitions.GetTopic(), p)
+			broker.partitionBrokers[key] = append(broker.partitionBrokers[key], newBroker)
+		}
+	} else {
+		for _, p := range partitions.Partition {
+			key := GeneratorKey(partitions.GetTopic(), p)
+			brokers := broker.partitionBrokers[key]
+			for i, v := range brokers {
+				if v == newBroker {
+					for i += 1; i < len(brokers); i++ {
+						brokers[i - 1] = brokers[i]
+					}
+					brokers = brokers[:len(brokers) - 1]
+					return
+				}
+			}
+		}
+	}
+}
+
+func (broker *Broker) Close() {
+	for _, topic := range broker.Topics {
+		topic.Close()
+	}
+	//for _, cancelFunc := range broker.cancelFuncs {
+	//	cancelFunc()
+	//}
+	log.Infof("broker %v close", broker)
 }
 
 type brokerServiceServer struct {
@@ -219,7 +331,7 @@ func NewBrokerServerServer(broker *Broker, appendChan chan *MsgBatch) (*brokerSe
 
 // broker
 
-// append from other broker
+// append the msgs come from other broker
 // rpc Append(stream MsgBatch) returns (Resp) {}
 func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) error {
 	for {
@@ -229,6 +341,7 @@ func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) 
 				appendServer.SendAndClose(&Resp{
 					Status:RespStatus_OK,
 				})
+				return nil
 			} else {
 				log.Error(err)
 				appendServer.SendAndClose(&Resp{
@@ -239,6 +352,7 @@ func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) 
 			return err
 		}
 		bss.broker.AppendMsgChan <- msgBatch
+		log.Debug("push success")
 	}
 }
 // get msg
@@ -247,6 +361,7 @@ func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) 
 func (bss *brokerServiceServer) Get(ctx context.Context, req *GetReq) (resp *GetResp, err error) {
 	broker := bss.broker
 	key := GeneratorKey(req.Topic, req.Partition)
+	resp = new(GetResp)
 	// 判断是否为partition的master
 	if isLeader, ok := broker.leaderPartitions[key]; !ok || !isLeader {
 		resp.Resp.Status = RespStatus_ERROR
@@ -285,6 +400,7 @@ func (bss *brokerServiceServer) Get(ctx context.Context, req *GetReq) (resp *Get
 // producer
 // rpc Push(stream MsgBatch) returns (Resp) {}
 func (bss *brokerServiceServer) Push(pushServer BrokerService_PushServer) error {
+	log.Debug("[GRPC] push")
 	for {
 		msgBatch, err := pushServer.Recv()
 		if err != nil {
@@ -292,6 +408,7 @@ func (bss *brokerServiceServer) Push(pushServer BrokerService_PushServer) error 
 				pushServer.SendAndClose(&Resp{
 					Status:RespStatus_OK,
 				})
+				return nil
 			} else {
 				log.Error(err)
 				pushServer.SendAndClose(&Resp{
@@ -301,7 +418,11 @@ func (bss *brokerServiceServer) Push(pushServer BrokerService_PushServer) error 
 			}
 			return err
 		}
-		bss.broker.AppendMsgChan <- msgBatch
+		if contain, ok := bss.broker.leaderPartitions[GeneratorKey(msgBatch.Topic, msgBatch.Partition)]; ok && contain {
+			bss.broker.AppendMsgChan <- msgBatch
+		} else {
+			log.Warnf("broker %s not lead topic %s-%d", bss.broker.Name, msgBatch.Topic, msgBatch.Partition)
+		}
 	}
 }
 
@@ -314,8 +435,8 @@ func (bss *brokerServiceServer) CreateTopic(ctx context.Context, req *CreateTopi
 	partitionCount := req.PartitionCount
 	replicaCount := req.ReplicaCount
 	brokerCount := len(broker.brokerClients) + 1
-
-	log.Info("create topic %s partition %d replica %d", topic, partitionCount, replicaCount)
+	resp = new(Resp)
+	log.Infof("create topic %s partition %d replica %d", topic, partitionCount, replicaCount)
 
 	if int(replicaCount) > brokerCount {
 		resp.Status = RespStatus_ERROR
@@ -334,17 +455,23 @@ func (bss *brokerServiceServer) CreateTopic(ctx context.Context, req *CreateTopi
 		return
 	}
 	// 分配给其他broker
-	for _, client := range broker.brokerClients {
+	for _, member := range broker.brokerClients {
+		parts := assignParts[clientIndex]
 		assignReq := &AssignTopicReq{
 			Topic:topic,
-			Partitions:assignParts[clientIndex],
+			Partitions: parts,
 			LeaderPartitions: assignLeaders[clientIndex]}
-		assResp, assErr := client.AssignTopic(ctx, assignReq)
+		assResp, assErr := member.client.AssignTopic(ctx, assignReq)
 		if assErr != nil || assResp.Status == RespStatus_ERROR{
 			log.Errorf("error: %s, info: %s", assErr, assResp.Comment)
 			// TODO 创建失败进行回滚
 		}
+		broker.UpdatePartitionBrokers(TopicPartition{Partition:parts, Topic:topic}, member.name, true)
+
+		clientIndex++
 	}
+	// 包含partition的broker
+
 	resp.Status = RespStatus_OK
 	return
 }
@@ -378,6 +505,7 @@ func calcLeaders(partCount, brokerCount int) [][]uint32 {
 func (bss *brokerServiceServer) AssignTopic(ctx context.Context, req *AssignTopicReq) (resp *Resp, err error) {
 	log.Debug("[GRPC] AssignTopic")
 	err = bss.broker.createTopic(req.Topic, req.Partitions, req.LeaderPartitions)
+	resp = new(Resp)
 	if err != nil {
 		log.Error("Assign topic error")
 		resp.Status = RespStatus_ERROR
@@ -406,8 +534,8 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 	allCount := req.Count // 必须大于0, 客户端保证
 	partitionCount := len(partitionOffset)
 
-	msgChan := make(chan []*MsgBatch)
-	errChan := make(chan error)
+	msgChan := make(chan []*MsgBatch, 1)
+	errChan := make(chan error, 1)
 
 	pullMsg := func() {
 		// 均匀读取
@@ -417,7 +545,9 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 		for part, offset := range partitionOffset {
 			key := GeneratorKey(topic, part)
 			if have, ok := broker.leaderPartitions[key]; !ok || !have {
-				errChan <- errors.New("this broker don't have this partition")
+				err := errors.New("this broker don't have this partition")
+				log.Error(err)
+				errChan <- err
 				return
 			}
 			// 如果一次读取的数目小于aveCount, 差值为delta, 则下一次读取数目为aveCount + delta, 保证数目尽可能达到
@@ -435,6 +565,8 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 			partitionOffset[part] += uint64(l)
 		}
 		msgChan <- msgBatchs
+		log.Debug("pullMsg success")
+		return
 	}
 
 	// timeout == 0表示取完立即返回
@@ -461,13 +593,20 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 		}
 	} else {
 		pullMsg()
-		msgBatches := <- msgChan
-		for _, msgBatch := range msgBatches {
-			err := pullServer.Send(msgBatch)
-			if err != nil {
-				log.Error(err)
-				return err
+		select {
+		case msgBatches := <- msgChan:
+			log.Debug("get data")
+			for _, msgBatch := range msgBatches {
+				err := pullServer.Send(msgBatch)
+				if err != nil {
+					log.Error(err)
+					return err
+				}
 			}
+		case err := <- errChan:
+			log.Error(err)
+		default:
+			log.Debug("pull no more data")
 		}
 	}
 	return nil
