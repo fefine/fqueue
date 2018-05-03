@@ -107,6 +107,7 @@ service BrokerService {
 
     // consumer
     // subscribe topics
+    // 考虑删除
     rpc Subscribe (SubReq) returns (SubResp) {}
     // Producer pull msg
     rpc Pull (PullReq) returns (stream MsgBatch) {}
