@@ -38,7 +38,7 @@ message SubReq {
 message SubResp {
     Resp resp = 1;
     // 分配给它的topic, partition
-    repeated TopicPartition topicPartitions = 2;
+    repeated TopicPartitionLeader topicPartitionLeaders = 2;
 }
 
 message PullReq {
@@ -72,6 +72,11 @@ message TopicPartitionOffset {
     string topic = 1;
     // partition, offset
     map<uint32, uint64> partitionOffset = 2;
+}
+
+message TopicPartitionLeader {
+    string topic = 1;
+    map<uint32, string> partitionLeader = 2;
 }
 
 message Resp {

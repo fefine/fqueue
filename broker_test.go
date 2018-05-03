@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 	"io"
+	"strings"
 )
 
 func DefaultBrokerConfig(id int, port int) *BrokerConfig {
@@ -132,4 +133,11 @@ func Pull(t *testing.T, client BrokerServiceClient, topic string, partitions []u
 				msgBatch.Topic, msgBatch.Partition, NewMessageFromSource(source))
 		}
 	}
+}
+
+func TestStringSplit(t *testing.T) {
+	s := "/brokers/topics/topic-1/partitions/1/state"
+	t.Log(strings.Split(s, "/")[3])
+	s = "/brokers/topics/topic-1"
+	t.Log(strings.Split(s, "/")[3])
 }

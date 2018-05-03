@@ -10,6 +10,8 @@ const (
 	DEFAULT_BATCH_COUNT = 3
 )
 
+var LOST_MSG_ERR = errors.New("lost some message, can't append")
+
 // 负责发送和接收
 type Topic interface {
 	// 写到指定的分区
@@ -96,12 +98,21 @@ func (ft *FileTopic) Write(msg *Msg, partition uint32) (err error) {
 	if err := ft.checkPartition(partition); err != nil {
 		return err
 	}
+	if !ft.canAppend(msg.Offset, partition) {
+		return LOST_MSG_ERR
+	}
 	return ft.Partitions[partition].WriteMsg(msg)
 }
 // 批量写入同一分区，保证同时写入成功或者同时失败
 func (ft *FileTopic) WriteMulti(msgs []*Msg, partition uint32) error {
 	if err := ft.checkPartition(partition); err != nil {
 		return err
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	if !ft.canAppend(msgs[0].Offset, partition) {
+		return LOST_MSG_ERR
 	}
 	return ft.Partitions[partition].WriteMultiMsg(msgs)
 }
@@ -111,11 +122,14 @@ func (ft *FileTopic) WriteMultiBytes(bytes [][]byte, partition uint32) error {
 	if err := ft.checkPartition(partition); err != nil {
 		return err
 	}
+	if len(bytes) == 0 {
+		return errors.New("msgs must contain at least one msg")
+	}
 	msgs := make([]*Msg, len(bytes))
 	for i, b := range bytes {
 		msgs[i] = NewMessageFromSource(b)
 	}
-	return ft.Partitions[partition].WriteMultiMsg(msgs)
+	return ft.WriteMulti(msgs, partition)
 }
 // 读取单条消息
 func (ft *FileTopic) Read(offset uint64, partition uint32) ([]byte, error) {
@@ -157,4 +171,9 @@ func (ft *FileTopic) Close() (err error) {
 	}
 	log.Infof("topic %v close", ft)
 	return
+}
+
+// 判断offset是否可以append, true为可以, false不行
+func (ft *FileTopic) canAppend(newOffset uint64, partition uint32) bool {
+	return newOffset == 0 || ft.OffsetLag(newOffset, partition) == 0
 }
