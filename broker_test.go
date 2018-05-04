@@ -1,25 +1,25 @@
 package fqueue
 
 import (
-	"fmt"
-	"testing"
-	"google.golang.org/grpc"
 	"context"
-	"time"
+	"fmt"
+	"google.golang.org/grpc"
 	"io"
-	"strings"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"testing"
+	"time"
 )
 
 func DefaultBrokerConfig(id int, port int) *BrokerConfig {
 	return &BrokerConfig{
-		Name: fmt.Sprintf("broker-%d", id),
+		Name:            fmt.Sprintf("broker-%d", id),
 		ListenerAddress: fmt.Sprintf("127.0.0.1:%d", port),
-		EtcdEndPoints: []string{"192.168.1.121:2379"},
-		DataPath:fmt.Sprintf("%s/broker-%d", HomePath(), id),
-		Debug: true}
+		EtcdEndPoints:   []string{"192.168.1.121:2379"},
+		DataPath:        fmt.Sprintf("%s/broker-%d", HomePath(), id),
+		Debug:           true}
 }
 
 // 单broker
@@ -46,10 +46,10 @@ func TestMultiBrokerAndStart(t *testing.T) {
 	broker1, err := NewBrokerAndStart(DefaultBrokerConfig(1, port))
 	NoError(t, err)
 
-	broker2, err := NewBrokerAndStart(DefaultBrokerConfig(2, port + 1))
+	broker2, err := NewBrokerAndStart(DefaultBrokerConfig(2, port+1))
 	NoError(t, err)
 
-	broker3, err := NewBrokerAndStart(DefaultBrokerConfig(3, port + 2))
+	broker3, err := NewBrokerAndStart(DefaultBrokerConfig(3, port+2))
 	NoError(t, err)
 
 	// 创建topic
@@ -78,12 +78,12 @@ func GetBrokerServiceClient(t *testing.T, port int) BrokerServiceClient {
 	return NewBrokerServiceClient(conn)
 }
 
-func CreateTopic(t *testing.T, broker *Broker, client BrokerServiceClient, topic string, pCount , re int) {
+func CreateTopic(t *testing.T, broker *Broker, client BrokerServiceClient, topic string, pCount, re int) {
 	t.Logf("create topic: %s, part: %d, replica: %d", topic, pCount, re)
 	req := &CreateTopicReq{
-		Topic: topic,
+		Topic:          topic,
 		PartitionCount: uint32(pCount),
-		ReplicaCount:uint32(re)}
+		ReplicaCount:   uint32(re)}
 	resp, err := client.CreateTopic(context.TODO(), req)
 	NoError(t, err)
 	t.Logf("resp: %v", resp.Status)
@@ -99,7 +99,7 @@ func Push(t *testing.T, client BrokerServiceClient, topic string, pCount int) {
 		for i, m := range msgs {
 			sources[i] = m.Source
 		}
-		NoError(t, pushClient.Send(&MsgBatch{Topic:topic, Partition:uint32(i % pCount), Msgs:sources}))
+		NoError(t, pushClient.Send(&MsgBatch{Topic: topic, Partition: uint32(i % pCount), Msgs: sources}))
 	}
 	resp, err := pushClient.CloseAndRecv()
 	NoError(t, err)
@@ -113,7 +113,7 @@ func Pull(t *testing.T, client BrokerServiceClient, topic string, partitions []u
 		po[v] = 0
 	}
 	tpSet := &TopicPartitionOffset{
-		Topic: topic,
+		Topic:           topic,
 		PartitionOffset: po}
 	req := &PullReq{
 		TpSet: tpSet,

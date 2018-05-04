@@ -1,9 +1,9 @@
 package fqueue
 
 import (
+	"errors"
 	log "github.com/sirupsen/logrus"
 	"io"
-	"errors"
 )
 
 const (
@@ -36,14 +36,14 @@ type FileTopic struct {
 	// 存放，可能没用
 	//MsgChan         []chan *Msg
 	// 一次读取的数量
-	BatchCount      uint32
+	BatchCount uint32
 }
 
 type TopicConfig struct {
-	Name            string
-	PartitionIds    []uint32
-	BatchCount      uint32
-	BasePath        string
+	Name         string
+	PartitionIds []uint32
+	BatchCount   uint32
+	BasePath     string
 }
 
 func NewFileTopic(config *TopicConfig) (ft *FileTopic, err error) {
@@ -103,6 +103,7 @@ func (ft *FileTopic) Write(msg *Msg, partition uint32) (err error) {
 	}
 	return ft.Partitions[partition].WriteMsg(msg)
 }
+
 // 批量写入同一分区，保证同时写入成功或者同时失败
 func (ft *FileTopic) WriteMulti(msgs []*Msg, partition uint32) error {
 	if err := ft.checkPartition(partition); err != nil {
@@ -131,6 +132,7 @@ func (ft *FileTopic) WriteMultiBytes(bytes [][]byte, partition uint32) error {
 	}
 	return ft.WriteMulti(msgs, partition)
 }
+
 // 读取单条消息
 func (ft *FileTopic) Read(offset uint64, partition uint32) ([]byte, error) {
 	if err := ft.checkPartition(partition); err != nil {
@@ -146,11 +148,11 @@ func (ft *FileTopic) ReadMulti(offset uint64, partition, count uint32) ([][]byte
 	}
 	part := ft.Partitions[partition]
 	sourceMsg, err := part.ReadMultiMsg(offset, count)
-	if err != nil && err != io.EOF{
+	if err != nil && err != io.EOF {
 		return nil, 0
 	}
 	// 判断长度，小于一半就重新构建slice，否则直接返回
-	if len(sourceMsg) < cap(sourceMsg) / 2 {
+	if len(sourceMsg) < cap(sourceMsg)/2 {
 		newSourceMsg := make([][]byte, 0, len(sourceMsg))
 		copy(newSourceMsg, sourceMsg)
 		sourceMsg = newSourceMsg

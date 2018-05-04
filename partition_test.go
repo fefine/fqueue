@@ -1,17 +1,16 @@
 package fqueue
 
 import (
-	"testing"
 	"fmt"
-	"math/rand"
 	"io"
+	"math/rand"
+	"testing"
 )
-
 
 func DefaultPartitionConfig(id uint32, topic string) *PartitionConfig {
 	return &PartitionConfig{
-		Id: id,
-		Topic: topic,
+		Id:       id,
+		Topic:    topic,
 		DataPath: HomePath() + "/fqueue",
 	}
 }
@@ -35,7 +34,7 @@ func BuildMultiMsg(t *testing.T, size, count int) (msgs []*Msg) {
 	for i := 0; i < count; i++ {
 		value := make([]byte, size)
 		for j := 0; j < size; j++ {
-			value[j] = '0' + byte(rand.Int() % 10)
+			value[j] = '0' + byte(rand.Int()%10)
 		}
 		msg := NewMessage([]byte(fmt.Sprintf("this is a key - %d", i)), value)
 		msgs = append(msgs, msg)
@@ -91,7 +90,7 @@ func TestNewFilePartition(t *testing.T) {
 	ReadMultiMsg(t, part, 0, 200)
 }
 
-func TestMultiPartition(t *testing.T)  {
+func TestMultiPartition(t *testing.T) {
 	signalChan := make(chan int, 5)
 	for i := 0; i < 5; i++ {
 		go func() {
@@ -99,7 +98,7 @@ func TestMultiPartition(t *testing.T)  {
 			signalChan <- 1
 		}()
 	}
-	for range "00000"{
-		<- signalChan
+	for range "00000" {
+		<-signalChan
 	}
 }

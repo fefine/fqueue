@@ -2,16 +2,16 @@ package fqueue
 
 import (
 	"fmt"
-	"testing"
 	"github.com/coreos/etcd/pkg/testutil"
+	"testing"
 )
 
 func DefaultTopicConfig(name string, partitions []uint32) *TopicConfig {
 	return &TopicConfig{
-		Name:name,
+		Name:         name,
 		PartitionIds: partitions,
-		BatchCount:DEFAULT_BATCH_COUNT,
-		BasePath: fmt.Sprintf("%s/fqueue/%s", HomePath(), name),
+		BatchCount:   DEFAULT_BATCH_COUNT,
+		BasePath:     fmt.Sprintf("%s/fqueue/%s", HomePath(), name),
 	}
 }
 

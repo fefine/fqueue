@@ -1,9 +1,9 @@
 package fqueue
 
 import (
-	"testing"
-	"github.com/coreos/etcd/clientv3"
 	"context"
+	"github.com/coreos/etcd/clientv3"
+	"testing"
 )
 
 func TestConnect(t *testing.T) {
@@ -19,7 +19,7 @@ func TestConnect(t *testing.T) {
 func getClient(t *testing.T) *clientv3.Client {
 	endpoints := []string{"192.168.1.121:2379"}
 	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:endpoints,
+		Endpoints: endpoints,
 	})
 	NoError(t, err)
 	return cli

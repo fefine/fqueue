@@ -1,9 +1,8 @@
 package fqueue
 
 const (
-	BROKER_FORMATER = "/brokers/ids/%s"
+	BROKER_FORMATER      = "/brokers/ids/%s"
 	TOPIC_PATTERN_PREFIX = "/brokers/topics/"
-
 )
 
 type EtcdTopic struct {
@@ -12,8 +11,8 @@ type EtcdTopic struct {
 }
 
 type EtcdBroker struct {
-	Version    uint32 `json:"version"`
-	Address    string `json:"address"`
+	Version uint32 `json:"version"`
+	Address string `json:"address"`
 }
 
 // consumer订阅的topic和partition

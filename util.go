@@ -2,13 +2,13 @@ package fqueue
 
 import (
 	"hash/crc32"
-	"os/user"
 	"log"
+	"os/user"
 )
 
 func Uint64ToByte(num uint64, bytes []byte) {
 	for i := 0; i < 8; i++ {
-		bytes[i] = byte(num >> uint((7 - i) * 8) & 0xff)
+		bytes[i] = byte(num >> uint((7-i)*8) & 0xff)
 	}
 }
 
@@ -22,7 +22,7 @@ func ByteToUint64(bytes []byte) (num uint64) {
 
 func Uint32ToByte(num uint32, bytes []byte) {
 	for i := 0; i < 4; i++ {
-		bytes[i] = byte(num >> uint((3 - i) * 8) & 0xff)
+		bytes[i] = byte(num >> uint((3-i)*8) & 0xff)
 	}
 }
 
