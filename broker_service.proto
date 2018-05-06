@@ -30,15 +30,13 @@ message GetResp {
 
 // 订阅, 默认从最新位置开始读取
 message SubReq {
-    repeated string topics = 1;
-    string cousumerGroup = 2;
-    string consumerId = 3;
+    repeated TopicPartition topics = 1;
 }
 
 message SubResp {
     Resp resp = 1;
-    // 分配给它的topic, partition
-    repeated TopicPartitionLeader topicPartitionLeaders = 2;
+    // 分配给它的topic, partition, 以及最新的offset
+    repeated TopicPartitionOffset topicPartitionOffset = 2;
 }
 
 message PullReq {
@@ -107,7 +105,6 @@ service BrokerService {
 
     // consumer
     // subscribe topics
-    // 考虑删除
     rpc Subscribe (SubReq) returns (SubResp) {}
     // Producer pull msg
     rpc Pull (PullReq) returns (stream MsgBatch) {}

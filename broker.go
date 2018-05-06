@@ -77,9 +77,9 @@ type Broker struct {
 }
 
 type BrokerMember struct {
-	name            string
-	listenerAddress string
-	client          BrokerServiceClient
+	Name            string
+	ListenerAddress string
+	Client          BrokerServiceClient
 }
 
 func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
@@ -128,12 +128,15 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 		return
 	}
 	log.Info("etcd server connect success")
+	//
+	// 判断是否重名, 重名
+	broker.checkBrokerExist()
 	broker.createLeaseAndKeepAlive()
 	// 2.2 get topic info, and cteate local topic
 	// 连接etcd, 获取到topic信息,
 	// 获得当前broker包含的partition和topic, 然后新建topic, FileTopic检测到当前文件路径下包含的partition会自动恢复;
 	// 检测leader, 检测到此broker领导的partition, 会去注册leader(lease), 然后更新本地的leader partition
-	// TODO broker启动的时候, 并不会检测它所有的partition是否有leader, 仅仅检测属于它领导的partition,
+	// broker启动的时候, 并不会检测它所有的partition是否有leader, 仅仅检测属于它领导的partition,
 	// 因此当一些broker启动失败的时候, 属于它领导的partition会无人领导, 而同样包含相同partition的不会去检测并领导它,
 	// 为了解决这个问题, 当客户端订阅topic的时候, 需要接收订阅请求的broker去确定这个topic的所有partition是否已经有leader
 	// 如果没有, 则会由这个leader去领导此topic与此broker交集的partition, 差集的partition则先创建一个临时的leader, 然后删除,
@@ -147,6 +150,18 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 	go broker.watchEtcd()
 	log.Infof("broker {%s} start!", broker.Name)
 	return
+}
+
+func (broker *Broker) checkBrokerExist() {
+	resp, err := broker.etcdClient.Get(context.Background(), fmt.Sprintf("/brokers/ids/%s", broker.Name))
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	if resp.Count > 0 {
+		// 说明存在
+		log.Fatalf("broker{%s} already exist", broker.Name)
+	}
 }
 
 // 扫描并且连接其他broker
@@ -434,7 +449,7 @@ func (broker *Broker) appendToSlaveBroker(batch *MsgBatch) error {
 	if clientNames, ok := broker.partitionBrokers[key]; ok {
 		for _, clientName := range clientNames {
 			log.Debugf("append log to broker %s, key %s", clientName, key)
-			client := broker.brokerClients[clientName].client
+			client := broker.brokerClients[clientName].Client
 			appendClient, err := client.Append(context.Background())
 			if err != nil {
 				log.Error("[append] get client error")
@@ -514,8 +529,8 @@ func (broker *Broker) AddBrokerMember(config *BrokerConfig) (err error) {
 		return
 	}
 	brokerClient := NewBrokerServiceClient(conn)
-	broker.brokerClients[config.Name] = &BrokerMember{client: brokerClient, name: config.Name,
-		listenerAddress: config.ListenerAddress}
+	broker.brokerClients[config.Name] = &BrokerMember{Client: brokerClient, Name: config.Name,
+		ListenerAddress: config.ListenerAddress}
 	log.Infof("connect to new broker %s success", config.Name)
 	return
 }
@@ -578,6 +593,11 @@ func (broker *Broker) UpdatePartitionBrokers(partitions TopicPartition, newBroke
 			}
 		}
 	}
+}
+
+func (broker *Broker) isLeaderPartition(topic string, partition uint32) bool {
+	lead, ok := broker.leaderPartitions[GeneratorKey(topic, partition)]
+	return ok && lead
 }
 
 func (broker *Broker) Close() {
@@ -737,12 +757,12 @@ func (bss *brokerServiceServer) CreateTopic(ctx context.Context, req *CreateTopi
 			Topic:            topic,
 			Partitions:       parts,
 			LeaderPartitions: assignLeaders[clientIndex]}
-		assResp, assErr := member.client.AssignTopic(ctx, assignReq)
+		assResp, assErr := member.Client.AssignTopic(ctx, assignReq)
 		if assErr != nil || assResp.Status == RespStatus_ERROR {
 			log.Errorf("error: %s, info: %s", assErr, assResp.Comment)
 			// 创建失败进行回滚
 		}
-		broker.UpdatePartitionBrokers(TopicPartition{Partition: parts, Topic: topic}, []string{member.name}, true)
+		broker.UpdatePartitionBrokers(TopicPartition{Partition: parts, Topic: topic}, []string{member.Name}, true)
 
 		clientIndex++
 	}
@@ -802,11 +822,25 @@ func (bss *brokerServiceServer) AssignTopic(ctx context.Context, req *AssignTopi
 
 // consumer
 // rpc Subscribe(SubReq) returns (SubResp) {}
-func (bss *brokerServiceServer) Subscribe(context.Context, *SubReq) (*SubResp, error) {
-	// 该consumer group第一次订阅， 分配分区由client来做
-	// TODO 怎么做？
-	// 1， 订阅的意义，
-	return nil, errors.New("not implement this method")
+func (bss *brokerServiceServer) Subscribe(ctx context.Context, req *SubReq) (*SubResp, error) {
+	log.Debug("[GRPC] Subscribe")
+	broker := bss.broker
+	tpos := make([]*TopicPartitionOffset, 0, len(req.Topics))
+	// 该consumer group第一次订阅， 把该broker包含的partition最新的offset返回回去
+	for _, topicPartition := range req.Topics {
+		topic := topicPartition.Topic
+		po := make(map[uint32]uint64)
+		for _, partition := range topicPartition.Partition {
+			if broker.isLeaderPartition(topic, partition) {
+				log.Debugf("broker{%s} topic{%s} partition{%d} latestOffset{%d}", broker.Name, topic, partition)
+				po[partition] = broker.Topics[topic].Partitions[partition].LatestMsgOffset
+			} else {
+				log.Warnf("broker{%s} not lead topic{%s} partition{%d}", broker.Name, topic, partition)
+			}
+		}
+		tpos = append(tpos, &TopicPartitionOffset{Topic: topic, PartitionOffset: po})
+	}
+	return &SubResp{Resp: &Resp{Status: RespStatus_OK}, TopicPartitionOffset: tpos}, nil
 }
 
 // rpc Pull(PullReq) returns (stream MsgBatch) {}
