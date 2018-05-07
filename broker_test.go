@@ -17,7 +17,7 @@ func DefaultBrokerConfig(id int, port int) *BrokerConfig {
 	return &BrokerConfig{
 		Name:            fmt.Sprintf("broker-%d", id),
 		ListenerAddress: fmt.Sprintf("127.0.0.1:%d", port),
-		EtcdEndPoints:   []string{"192.168.1.121:2379"},
+		EtcdEndPoints:   []string{"192.168.1.84:2379"},
 		DataPath:        fmt.Sprintf("%s/broker-%d", HomePath(), id),
 		Debug:           true}
 }
@@ -45,13 +45,13 @@ func TestMultiBrokerAndStart(t *testing.T) {
 	port := 8090
 	broker1, err := NewBrokerAndStart(DefaultBrokerConfig(1, port))
 	NoError(t, err)
-
+	time.Sleep(time.Second)
 	broker2, err := NewBrokerAndStart(DefaultBrokerConfig(2, port+1))
 	NoError(t, err)
-
+	time.Sleep(time.Second)
 	broker3, err := NewBrokerAndStart(DefaultBrokerConfig(3, port+2))
 	NoError(t, err)
-
+	time.Sleep(time.Second)
 	// 创建topic
 	//client := GetBrokerServiceClient(t, port)
 	//topic := "demo-topic-multi"
@@ -60,7 +60,7 @@ func TestMultiBrokerAndStart(t *testing.T) {
 	//CreateTopic(t, broker1, client, topic, pCount, 2)
 	//time.Sleep(1 * time.Second)
 	// 移除broker
-	broker2.Close()
+	//broker2.Close()
 	// 发送消息
 	//Push(t, client, topic, pCount)
 	//time.Sleep(1 * time.Second)

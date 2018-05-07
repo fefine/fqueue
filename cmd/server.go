@@ -24,6 +24,8 @@ func main() {
 	flag.StringVar(&endpoints, "endpoints", "192.168.1.121:2379", "listen address")
 	config.EtcdEndPoints = strings.Split(endpoints, ",")
 
+	flag.Parse()
+
 	config.Debug = true
 
 	if config.Debug {

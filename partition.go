@@ -5,6 +5,7 @@ import (
 	"fmt"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/exp/mmap"
+	"io"
 	"os"
 	"sync"
 )
@@ -171,6 +172,10 @@ func (idx *FileIndex) rollback() (err error) {
 }
 
 func (idx *FileIndex) read(off uint64) (offset, position uint64, length uint32, err error) {
+	end, _ := idx.indexReader.Seek(0, 2)
+	if end <= int64(off*20) {
+		return 0, 0, 0, io.EOF
+	}
 	bytes := make([]byte, 20)
 	_, err = idx.indexReader.ReadAt(bytes, int64(off*20))
 	if err != nil {
@@ -375,12 +380,13 @@ func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 
 // 当数量不够时，读取多少返回多少
 func (p *FilePartition) ReadMultiMsg(offset uint64, size uint32) (msgs [][]byte, err error) {
-	msgs = make([][]byte, size)
+	msgs = make([][]byte, 0, size)
 	for i := 0; i < int(size); i++ {
-		msgs[i], err = p.ReadMsg(offset + uint64(i))
+		msg, err := p.ReadMsg(offset + uint64(i))
 		if err != nil {
 			break
 		}
+		msgs = append(msgs, msg)
 	}
 	return
 }
