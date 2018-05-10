@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -58,7 +58,7 @@ func main() {
 			if replica == 0 {
 				log.Fatalln("replica count must > 0")
 			}
-
+			createTopic(strings.Split(endpoint, ","), name, uint32(partition), uint32(replica))
 		}
 	}
 }

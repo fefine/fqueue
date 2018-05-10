@@ -151,9 +151,12 @@ func (ft *FileTopic) ReadMulti(offset uint64, partition, count uint32) ([][]byte
 	if err != nil && err != io.EOF {
 		return nil, 0
 	}
+	if err != nil {
+		log.Error(err)
+	}
 	// 判断长度，小于一半就重新构建slice，否则直接返回
 	if len(sourceMsg) < cap(sourceMsg)/2 {
-		newSourceMsg := make([][]byte, 0, len(sourceMsg))
+		newSourceMsg := make([][]byte, len(sourceMsg))
 		copy(newSourceMsg, sourceMsg)
 		sourceMsg = newSourceMsg
 	}

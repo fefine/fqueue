@@ -4,15 +4,16 @@ import (
 	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/exp/mmap"
 	"io"
 	"os"
 	"sync"
+	"time"
 )
 
 const (
 	IndexFilePostfix = "index"
 	MsgFilePostfix   = "msg"
+	DefaultFlushTime = 500 // 500ms
 )
 
 // 为了
@@ -58,9 +59,13 @@ type FilePartition struct {
 
 	msgWriter *os.File
 	// reader
-	msgReader *mmap.ReaderAt // 用于读取msg
+	//msgReader *mmap.ReaderAt // 用于读取msg
+	msgReader *os.File // 用于读取msg
 
 	metaRWer *os.File
+
+	// 刷盘
+	FlushTime time.Duration
 }
 
 // 保存 8byte offset， 8 byte position， 4 byte len = 20
@@ -82,6 +87,8 @@ type PartitionConfig struct {
 	Id       uint32
 	Topic    string
 	DataPath string
+	// ms, flush write content to disk
+	FlushTime uint32
 }
 
 // TODO 增加file lock，防止冲突
@@ -93,6 +100,11 @@ func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 
 	fp = new(FilePartition)
 	fp.Id = config.Id
+	if config.FlushTime == 0 {
+		fp.FlushTime = time.Millisecond * time.Duration(DefaultFlushTime)
+	} else {
+		fp.FlushTime = time.Millisecond * time.Duration(config.FlushTime)
+	}
 
 	// 创建文件夹
 	path := fmt.Sprintf("%s/%s/partition-%d", config.DataPath, config.Topic, config.Id)
@@ -120,7 +132,8 @@ func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 	}
 
 	// 当文件未创建的时候，会报错
-	fp.msgReader, err = mmap.Open(msgFileName)
+	//fp.msgReader, err = mmap.Open(msgFileName)
+	fp.msgReader, err = os.OpenFile(msgFileName, os.O_RDONLY, 0755)
 	if err != nil {
 		log.Errorf("open mmap msg read file error: %v", err)
 		return
@@ -143,6 +156,8 @@ func NewFilePartition(config *PartitionConfig) (fp *FilePartition, err error) {
 	}
 
 	fp.recovery()
+
+	//go fp.flush()
 
 	log.Debugf("create partition: %v success", fp)
 
@@ -239,6 +254,20 @@ func (idx *FileIndex) String() string {
 
 // ---------------------------------------------------------------------------------------------------------------------
 
+func (p *FilePartition) flush() {
+	for {
+		err := p.msgWriter.Sync()
+		if err != nil {
+			log.Error(err)
+		}
+		err = p.Index.indexWriter.Sync()
+		if err != nil {
+			log.Error(err)
+		}
+		time.Sleep(p.FlushTime)
+	}
+}
+
 func (p *FilePartition) write(msg []byte) (err error) {
 	if len(msg) < MSG_HEADER_LENGTH {
 		err = errors.New("unsupported msg")
@@ -313,7 +342,7 @@ func (p *FilePartition) WriteMsg(msg *Msg) (err error) {
 	} else {
 		// 可以小于，不能大于
 		if msg.Offset > offset {
-			return errors.New(fmt.Sprintf("wrong offset %d, large then current offset %d"))
+			return errors.New(fmt.Sprintf("wrong offset %d, large then current offset %d", msg.Offset, offset))
 		}
 		offset = msg.Offset
 		// 此pos必定存在
@@ -380,6 +409,7 @@ func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 
 // 当数量不够时，读取多少返回多少
 func (p *FilePartition) ReadMultiMsg(offset uint64, size uint32) (msgs [][]byte, err error) {
+	log.Debugf("partition-%d newOffset: %d", p.Id, p.LatestMsgOffset)
 	msgs = make([][]byte, 0, size)
 	for i := 0; i < int(size); i++ {
 		msg, err := p.ReadMsg(offset + uint64(i))
@@ -406,7 +436,7 @@ func (p *FilePartition) recovery() (err error) {
 	}
 	_, err = p.msgWriter.Seek(int64(position+uint64(length)), 0)
 	p.LatestMsgOffset = offset + 1
-	log.Infof("[recovery] offset: %d, position: %d", offset, position)
+	log.Infof("[recovery] partition: %d offset: %d, position: %d", p.Id, offset, position)
 	return
 }
 

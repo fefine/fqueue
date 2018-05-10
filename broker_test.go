@@ -17,7 +17,7 @@ func DefaultBrokerConfig(id int, port int) *BrokerConfig {
 	return &BrokerConfig{
 		Name:            fmt.Sprintf("broker-%d", id),
 		ListenerAddress: fmt.Sprintf("127.0.0.1:%d", port),
-		EtcdEndPoints:   []string{"192.168.1.84:2379"},
+		EtcdEndPoints:   []string{"127.0.0.1:2379"},
 		DataPath:        fmt.Sprintf("%s/broker-%d", HomePath(), id),
 		Debug:           true}
 }
@@ -31,7 +31,7 @@ func TestSingleBrokerAndStart(t *testing.T) {
 	client := GetBrokerServiceClient(t, port)
 	topic := "demo-topic"
 	pCount := 10
-	CreateTopic(t, broker, client, topic, pCount, 1)
+	CreateTopic(t, client, topic, pCount, 1)
 
 	//Push(t, client, topic, pCount)
 	//time.Sleep(3 * time.Second)
@@ -53,12 +53,14 @@ func TestMultiBrokerAndStart(t *testing.T) {
 	NoError(t, err)
 	time.Sleep(time.Second)
 	// 创建topic
+	///*
 	//client := GetBrokerServiceClient(t, port)
-	//topic := "demo-topic-multi"
+	//topic := "local-topic"
 	//pCount := 10
 	//time.Sleep(time.Second)
-	//CreateTopic(t, broker1, client, topic, pCount, 2)
+	//CreateTopic(t, client, topic, pCount, 2)
 	//time.Sleep(1 * time.Second)
+	//*/
 	// 移除broker
 	//broker2.Close()
 	// 发送消息
@@ -72,13 +74,25 @@ func TestMultiBrokerAndStart(t *testing.T) {
 	broker3.Close()
 }
 
+func TestPush(t *testing.T) {
+	client := GetBrokerServiceClient(t, 8091)
+	topic := "local-topic"
+	pCount := 10
+	time.Sleep(time.Second)
+	// 移除broker
+	//broker2.Close()
+	// 发送消息
+	Push(t, client, topic, pCount)
+	time.Sleep(1 * time.Second)
+}
+
 func GetBrokerServiceClient(t *testing.T, port int) BrokerServiceClient {
 	conn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%d", port), grpc.WithInsecure())
 	NoError(t, err)
 	return NewBrokerServiceClient(conn)
 }
 
-func CreateTopic(t *testing.T, broker *Broker, client BrokerServiceClient, topic string, pCount, re int) {
+func CreateTopic(t *testing.T, client BrokerServiceClient, topic string, pCount, re int) {
 	t.Logf("create topic: %s, part: %d, replica: %d", topic, pCount, re)
 	req := &CreateTopicReq{
 		Topic:          topic,

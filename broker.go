@@ -354,6 +354,7 @@ func (broker *Broker) scanAndCreateTopic() {
 			// 忽略version
 			// 找到此broker保存的topic-partitions
 			for part, bs := range topic.Partitions {
+				log.Debugf("{%s} - topic: %s part: %d brokers: %v", broker.Name, topic, part, bs)
 				broker.UpdatePartitionBrokers(TopicPartition{Topic: tName, Partition: []uint32{part}}, bs, true)
 				for _, b := range bs {
 					if b == broker.Name {
@@ -380,6 +381,36 @@ func (broker *Broker) scanAndCreateTopic() {
 		} else {
 			log.Errorf("wrong etcd key: %s value: %v", key, string(kv.Value))
 		}
+	}
+}
+
+// 扫描某一个topic
+func (broker *Broker) scanTopic(topicName string) {
+	getResp, err := broker.etcdClient.Get(context.Background(), fmt.Sprintf("/brokers/topics/%s", topicName))
+	if err != nil {
+		log.Errorf("scan topic info error, err: %v", err)
+		return
+	}
+	if getResp.Count == 0 {
+		log.Info("not found topic ", topicName)
+		return
+	}
+	for _, kv := range getResp.Kvs {
+		key := string(kv.Key)
+		log.Debugf("scan topic get etcd key: %s value: %v", key, string(kv.Value))
+		// topic
+		topic := new(EtcdTopic)
+		err := json.Unmarshal(kv.Value, topic)
+		if err != nil {
+			log.Error("unmarshal topic value error, err: %v", err)
+			continue
+		}
+		// 找到此broker保存的topic-partitions
+		for part, bs := range topic.Partitions {
+			log.Debugf("{%s} - topic: %s part: %d brokers: %v", broker.Name, topic, part, bs)
+			broker.UpdatePartitionBrokers(TopicPartition{Topic: topicName, Partition: []uint32{part}}, bs, true)
+		}
+
 	}
 }
 
@@ -533,8 +564,8 @@ func (broker *Broker) appendToSlaveBroker(batch *MsgBatch) error {
 func (broker *Broker) createTopic(t string, assignPartitions, leadPartitions []uint32) (err error) {
 	tp := TopicPartition{Topic: t, Partition: assignPartitions}
 	broker.recoveryTopic(tp, leadPartitions)
-	broker.UpdatePartitionBrokers(tp, []string{broker.Name}, true)
-	// 把leader partition发布到etcd, 然后放到leadPartition中
+	// 扫描topic，添加对应的broker
+	broker.scanTopic(t)
 	// put state & leader(lease)
 	for _, p := range leadPartitions {
 		key := fmt.Sprintf("/brokers/topics/%s/partitions/%d", t, p)
@@ -586,7 +617,7 @@ func (broker *Broker) AddBrokerMember(config *BrokerConfig) (err error) {
 	brokerClient := NewBrokerServiceClient(conn)
 	broker.brokerClients[config.Name] = &BrokerMember{Client: brokerClient, Name: config.Name,
 		ListenerAddress: config.ListenerAddress}
-	log.Infof("connect to new broker %s success", config.Name)
+	log.Infof("%s connect to new broker %s success", broker.Name, config.Name)
 	return
 }
 
@@ -682,6 +713,7 @@ func NewBrokerServerServer(broker *Broker, appendChan chan *MsgBatch) *brokerSer
 // append the msgs come from other broker
 // rpc Append(stream MsgBatch) returns (Resp) {}
 func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) error {
+	log.Debug("[GRPC] Append")
 	for {
 		msgBatch, err := appendServer.Recv()
 		if err != nil {
@@ -700,7 +732,7 @@ func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) 
 			return err
 		}
 		bss.broker.AppendMsgChan <- msgBatch
-		log.Debug("append success")
+		log.Debug("append success, topic: %s partition: %d", msgBatch.Topic, msgBatch.Partition)
 	}
 }
 
@@ -708,6 +740,7 @@ func (bss *brokerServiceServer) Append(appendServer BrokerService_AppendServer) 
 // rpc Get(GetReq) returns (GetResp) {}
 // TODO get需要涉及并发情况, 带完善
 func (bss *brokerServiceServer) Get(ctx context.Context, req *GetReq) (resp *GetResp, err error) {
+	log.Debug("[GRPC] Get")
 	broker := bss.broker
 	key := GeneratorKey(req.Topic, req.Partition)
 	resp = new(GetResp)
@@ -778,6 +811,7 @@ func (bss *brokerServiceServer) Push(pushServer BrokerService_PushServer) error 
 
 // rpc CreatePartition(CreatePartitionReq) returns (Resp) {}
 // 创建分区
+// 先把broker分好， 然后创建到etcd
 func (bss *brokerServiceServer) CreateTopic(ctx context.Context, req *CreateTopicReq) (resp *Resp, err error) {
 	log.Debug("[GRPC] CreateTopic")
 	broker := bss.broker
@@ -785,6 +819,7 @@ func (bss *brokerServiceServer) CreateTopic(ctx context.Context, req *CreateTopi
 	partitionCount := req.PartitionCount
 	replicaCount := req.ReplicaCount
 	brokerCount := len(broker.brokerClients) + 1
+
 	resp = new(Resp)
 	log.Infof("create topic %s partition %d replica %d", topic, partitionCount, replicaCount)
 	if err = broker.checkTopic(topic); err != nil {
@@ -793,51 +828,71 @@ func (bss *brokerServiceServer) CreateTopic(ctx context.Context, req *CreateTopi
 		resp.Comment = err.Error()
 		return
 	}
+
 	if int(replicaCount) > brokerCount {
 		resp.Status = RespStatus_ERROR
 		resp.Comment = fmt.Sprintf("replicaCount: %d must small or equals then broker count: %d", replicaCount, brokerCount)
 		return resp, errors.New(resp.Comment)
 	}
+
 	assignParts := calcAssignPartitions(int(partitionCount), int(replicaCount), brokerCount)
 	assignLeaders := calcLeaders(int(partitionCount), brokerCount)
+
 	clientIndex := 0
-	// 分配给自己
-	err = broker.createTopic(topic, assignParts[clientIndex], assignLeaders[clientIndex])
+	broker.UpdatePartitionBrokers(
+		TopicPartition{Topic: topic, Partition: assignParts[clientIndex]},
+		[]string{broker.Name}, true)
+
 	clientIndex++
 	if err != nil {
 		resp.Status = RespStatus_ERROR
 		resp.Comment = err.Error()
 		return
 	}
+
+	// 为了防止创建topic的时候并不知道某个partition对应的所有broker，
+	// 因此，先分配，将结果发布到etcd，然后创建topic，这样就能获取到所有的broker
+	assRes := make(map[string]*AssignTopicReq)
+
 	// 分配给其他broker
 	// warring 创建topic的时候有broker exit
-	for _, member := range broker.brokerClients {
+	for name, member := range broker.brokerClients {
 		parts := assignParts[clientIndex]
 		assignReq := &AssignTopicReq{
 			Topic:            topic,
 			Partitions:       parts,
 			LeaderPartitions: assignLeaders[clientIndex]}
-		assResp, assErr := member.Client.AssignTopic(ctx, assignReq)
+		assRes[name] = assignReq
+		broker.UpdatePartitionBrokers(TopicPartition{Partition: parts, Topic: topic}, []string{member.Name}, true)
+		clientIndex++
+	}
+	// put topic on etcd
+	bss.putTopic(topic, int(partitionCount))
+	// 分配给自己
+	err = broker.createTopic(topic, assignParts[0], assignLeaders[0])
+	// 分配到其他人
+	for name, req := range assRes {
+		member := bss.broker.brokerClients[name]
+		assResp, assErr := member.Client.AssignTopic(ctx, req)
 		if assErr != nil || assResp.Status == RespStatus_ERROR {
 			log.Errorf("error: %s, info: %s", assErr, assResp.Comment)
 			// 创建失败进行回滚
 		}
-		broker.UpdatePartitionBrokers(TopicPartition{Partition: parts, Topic: topic}, []string{member.Name}, true)
-
-		clientIndex++
 	}
-	// 发布到etcd topic /brokers/topics/[topic]
-	// 包含partition的broker
+	resp.Status = RespStatus_OK
+	return
+}
+
+// 发布到etcd topic /brokers/topics/[topic]
+// 包含partition的broker
+func (bss *brokerServiceServer) putTopic(topic string, partitionCount int) {
 	etcdTopic := EtcdTopic{Version: VERSION, Partitions: make(map[uint32][]string)}
-	for i := 0; i < int(partitionCount); i++ {
-		etcdTopic.Partitions[uint32(i)] = broker.partitionBrokers[GeneratorKey(topic, uint32(i))]
+	for i := 0; i < partitionCount; i++ {
+		etcdTopic.Partitions[uint32(i)] = bss.broker.partitionBrokers[GeneratorKey(topic, uint32(i))]
 	}
 	key := fmt.Sprintf("/brokers/topics/%s", topic)
 	value, _ := json.Marshal(etcdTopic)
-	broker.etcdClient.Put(context.Background(), key, string(value))
-
-	resp.Status = RespStatus_OK
-	return
+	bss.broker.etcdClient.Put(context.Background(), key, string(value))
 }
 
 // 计算分区分配
@@ -947,8 +1002,10 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 			// 更新offset
 			partitionOffset[part] += uint64(l)
 		}
+		if len(msgBatchs) == 0 {
+			log.Debug("no more data")
+		}
 		msgChan <- msgBatchs
-		log.Debug("pullMsg success")
 		return
 	}
 

@@ -1,4 +1,4 @@
-package main
+package consumer
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -47,8 +48,10 @@ type Consumer struct {
 	// 此consumer分配的
 	//Assign                 map[string]*queue.TopicPartitionLeader
 	Assign []*queue.PartitionInfo
-	// 方便获取
-	assignMap   map[string]*queue.PartitionInfo
+	// 方便获取， 同时记录当前commit的
+	assignMap map[string]*queue.PartitionInfo
+	// pullMap 用来记录当前pull的msg offset, 这样pull和commit就分开了
+	pullOffset  map[string]uint64
 	AssignMutex sync.Mutex
 	//AssignedPartitionCount int
 	//ConsumeOffset          map[string]*queue.TopicPartitionOffset
@@ -57,6 +60,8 @@ type Consumer struct {
 	// 所有的消费者
 	consumers      []uint32
 	consumersMutex sync.Mutex
+
+	sleepMS time.Duration
 
 	msgBatchChan   chan *MessageBatch
 	errorChan      chan error
@@ -91,7 +96,8 @@ type ConsumerConfig struct {
 	Debug        bool
 }
 
-func NewConsumer(config *ConsumerConfig) (consumer *Consumer) {
+// TODO 使用log.Error是不合理的, 改成log.error, 返回值增加error
+func NewConsumer(config *ConsumerConfig) (consumer *Consumer, err error) {
 
 	if config == nil {
 		panic(errors.New("not found consumer config"))
@@ -111,6 +117,7 @@ func NewConsumer(config *ConsumerConfig) (consumer *Consumer) {
 	consumer.Brokers = make(map[string]*queue.BrokerMember)
 	consumer.msgBatchChan = make(chan *MessageBatch, queue.DEFAULT_CHAN_COUNT)
 	consumer.assignMap = make(map[string]*queue.PartitionInfo)
+	consumer.pullOffset = make(map[string]uint64)
 	//consumer.Subscribe = make(map[string]*queue.TopicPartitionLeader)
 	//consumer.Assign = make(map[string]*queue.TopicPartitionLeader)
 	//consumer.ConsumeOffset = make(map[string]*queue.TopicPartitionOffset)
@@ -122,18 +129,29 @@ func NewConsumer(config *ConsumerConfig) (consumer *Consumer) {
 	}
 
 	// 1，连接etcd，获取leaseId
-	consumer.EtcdClient = consumer.connectEtcd()
-	consumer.createLeaseAndKeepAlive()
+	consumer.EtcdClient, err = consumer.connectEtcd()
+	if err != nil {
+		return
+	}
+	err = consumer.createLeaseAndKeepAlive()
+	if err != nil {
+		return
+	}
 	// 2，获取broker，topic，leader信息，
-	consumer.getBrokerInfo()
+	err = consumer.getBrokerInfo()
+	if err != nil {
+		return
+	}
 	consumer.getTopicInfo()
 	// 3，注册consumer信息
-	consumer.registerConsumer()
-	// 4，获取consumer信息和分配Partition
+	err = consumer.registerConsumer()
+	if err != nil {
+		return
+	}
+	// 4，获取consumer信息和
 	consumer.getOtherConsumerInfo()
+	// 5，分配Partition并获取Assign Partition Offset
 	consumer.ReassignPartition()
-	// 5，获取Assign Partition Offset
-	consumer.getOffsetInfo()
 	//  6，监听consumer group， 如果consumer增加或减少，重新分配,  监听broker, 如果broker宕机, 进行更换
 	go consumer.watchConsumerAndBroker()
 	// 7，建立消息管道, 循环获取Assign中的消息, pull之后更新本地offset
@@ -179,16 +197,19 @@ func (consumer *Consumer) Pull(ctx context.Context, count int) (mbs []*MessageBa
 func (consumer *Consumer) asyncPullMessage() {
 	for {
 		consumer.syncPullMessage()
+		time.Sleep(time.Millisecond * consumer.sleepMS)
 	}
 }
 
+// 简化版， 一次仅请求一个分区
 func (consumer *Consumer) syncPullMessage() error {
 	//consumer.AssignMutex.Lock()
 	//defer consumer.AssignMutex.Unlock()
 	partitionInfo := consumer.Assign[consumer.partitionIndex%len(consumer.Assign)]
 	client := consumer.Brokers[partitionInfo.Leader]
 	po := make(map[uint32]uint64)
-	po[partitionInfo.Partition] = partitionInfo.Offset
+	// 从pullOffset中找到offset
+	po[partitionInfo.Partition] = consumer.pullOffset[generateKey(partitionInfo.Topic, partitionInfo.Partition)]
 	topicPartitionOffset := &queue.TopicPartitionOffset{Topic: partitionInfo.Topic, PartitionOffset: po}
 	req := &queue.PullReq{Count: PULL_COUNT, Timeout: 0, TpSet: topicPartitionOffset}
 	log.Debugf("pull topic{%s} partition{%d} offset{%d} count{%d}",
@@ -215,8 +236,12 @@ func (consumer *Consumer) syncPullMessage() error {
 				mb.Topic, mb.Partition, mb.StartOffset, len(mb.Msgs))
 			msgs := convertMessage(mb)
 			// 满了之后会阻塞
+			// 添加pullMap
 			consumer.msgBatchChan <- msgs
-
+			newOffset := msgs.Messages[len(mb.Msgs)-1].Offset + 1
+			consumer.pullOffset[generateKey(msgs.Topic, msgs.Partition)] = newOffset
+			log.Debugf("recv topic{%s} partition{%d} newOffset{%d}",
+				mb.Topic, mb.Partition, newOffset)
 		}
 	}
 }
@@ -225,6 +250,7 @@ func (consumer *Consumer) watchConsumerAndBroker() {
 	log.Debug("watch consumers and brokers")
 	watchChan := consumer.EtcdClient.Watch(context.Background(), "/", clientv3.WithPrefix())
 	consumerPattern, _ := regexp.Compile(fmt.Sprintf("^/consumers/%s/ids/(\\d+)$", consumer.GroupName))
+	brokerPattern, _ := regexp.Compile("^/brokers/ids/([\\w\\d_-]+)$")
 	leaderParttern, _ := regexp.Compile("^/brokers/topics/([\\w\\d_-]+)/partitions/(\\d+)/leader$")
 	// /consumers/[groupId]/ids/[consumerId]
 	for watchResp := range watchChan {
@@ -241,6 +267,18 @@ func (consumer *Consumer) watchConsumerAndBroker() {
 						consumerId, _ := strconv.ParseUint(matcheGroups[2], 10, 32)
 						consumer.addConsumer(uint32(consumerId))
 						consumer.ReassignPartition()
+						continue
+					}
+					if brokerPattern.Match(event.Kv.Key) {
+						matcheGroups := brokerPattern.FindStringSubmatch(string(event.Kv.Key))
+						brokerName := matcheGroups[1]
+						etcdBroker := new(queue.EtcdBroker)
+						err := json.Unmarshal(event.Kv.Value, etcdBroker)
+						if err != nil {
+							log.Error("parse etcd broker failed, err: %v", err)
+							continue
+						}
+						consumer.AddBroker(&queue.BrokerConfig{Name: brokerName, ListenerAddress: etcdBroker.Address})
 						continue
 					}
 					if leaderParttern.Match(event.Kv.Key) {
@@ -267,6 +305,12 @@ func (consumer *Consumer) watchConsumerAndBroker() {
 						consumer.ReassignPartition()
 						continue
 					}
+					if brokerPattern.Match(event.Kv.Key) {
+						matcheGroups := brokerPattern.FindStringSubmatch(string(event.Kv.Key))
+						brokerName := matcheGroups[1]
+						consumer.RemoveBroker(brokerName)
+						continue
+					}
 				}
 			}
 		}
@@ -287,11 +331,24 @@ func (consumer *Consumer) ReassignPartition() {
 	consumer.AssignMutex.Lock()
 	defer consumer.AssignMutex.Unlock()
 	log.Debug("reassign partition")
-	// len == 0
+	// len == 0, 清除所有的partitionInfo
 	consumer.Assign = consumer.Assign[:0]
 	for k := range consumer.assignMap {
 		delete(consumer.assignMap, k)
+		// 这个清除并不是必要的
+		delete(consumer.pullOffset, k)
 	}
+
+	consumerPartition := func(i int) {
+		pi := consumer.Subscribe[i]
+		consumer.putPartitionOwner(pi.Topic, pi.Partition)
+		consumer.Assign = append(consumer.Assign, pi)
+		consumer.assignMap[generateKey(pi.Topic, pi.Partition)] = pi
+		consumer.pullOffset[generateKey(pi.Topic, pi.Partition)] = pi.Offset
+		log.Infof("consumer{%d} assigned topic{%s} partition{%d} offset{%d}",
+			consumer.Id, pi.Topic, pi.Partition, pi.Offset)
+	}
+
 	// 1, 排序, 并找到当前consumer的位置
 	// sort consumer
 	sort.Slice(consumer.consumers, func(i, j int) bool { return consumer.consumers[i] < consumer.consumers[j] })
@@ -312,45 +369,36 @@ func (consumer *Consumer) ReassignPartition() {
 	last := len(cs) % len(consumer.consumers)
 	if last == 0 {
 		for i := position * n; i < (position+1)*n; i++ {
-			pi := consumer.Subscribe[i]
-			consumer.putPartitionOwner(pi.Topic, pi.Partition)
-			consumer.Assign = append(consumer.Assign, pi)
-			consumer.assignMap[generateKey(pi.Topic, pi.Partition)] = pi
-			log.Infof("consumer{%d} assigned topic{%s} partition{%d} offset{%d}",
-				consumer.Id, pi.Topic, pi.Partition, pi.Offset)
+			consumerPartition(i)
 		}
 	} else {
 		if position <= last {
 			n += 1
 			for i := position * n; i < (position+1)*n; i++ {
-				pi := consumer.Subscribe[i]
-				consumer.putPartitionOwner(pi.Topic, pi.Partition)
-				consumer.Assign = append(consumer.Assign, pi)
-				consumer.assignMap[generateKey(pi.Topic, pi.Partition)] = pi
-				log.Infof("consumer{%d} assigned topic{%s} partition{%d} offset{%d}",
-					consumer.Id, pi.Topic, pi.Partition, pi.Offset)
+				consumerPartition(i)
 			}
 		} else {
 			start := len(consumer.Subscribe) - (n+1)*last - (position-last)*n
 			for i := start; i < start+n; i++ {
-				pi := consumer.Subscribe[i]
-				consumer.putPartitionOwner(pi.Topic, pi.Partition)
-				consumer.Assign = append(consumer.Assign, pi)
-				consumer.assignMap[generateKey(pi.Topic, pi.Partition)] = pi
-				log.Infof("consumer{%d} assigned topic{%s} partition{%d} offset{%d}",
-					consumer.Id, pi.Topic, pi.Partition, pi.Offset)
+				consumerPartition(i)
 			}
 		}
 	}
+	// 恢复offset
+	consumer.getOffsetInfo()
+	// 调整pull req间隔时间
+	consumer.sleepMS = time.Duration(1000 / len(consumer.Assign))
 }
 
 // remove owner
-func (consumer *Consumer) putPartitionOwner(topic string, partition uint32) {
+func (consumer *Consumer) putPartitionOwner(topic string, partition uint32) error {
 	key := fmt.Sprintf("/consumers/%s/owners/%s/%d", consumer.GroupName, topic, partition)
 	_, err := consumer.EtcdClient.Put(context.Background(), key, string(consumer.Id))
 	if err != nil {
 		log.Errorf("put topic{%s} partition{%d} owner failed, err: %v", topic, partition, err)
+		return err
 	}
+	return nil
 }
 
 // remove owner
@@ -362,13 +410,14 @@ func (consumer *Consumer) removePartitionOwner(topic string, partition uint32) {
 	}
 }
 
-func (consumer *Consumer) getOtherConsumerInfo() {
+func (consumer *Consumer) getOtherConsumerInfo() (err error) {
 	log.Debug("getOther consumer info")
 	// 获取consumer
 	consumersKey := fmt.Sprintf("/consumers/%s/ids", consumer.GroupName)
 	resp, err := consumer.EtcdClient.Get(context.Background(), consumersKey, clientv3.WithPrefix())
 	if err != nil {
-		log.Fatalf("get other consumer error, err: %v", err)
+		log.Errorf("get other consumer error, err: %v", err)
+		return
 	}
 	reg, _ := regexp.Compile(fmt.Sprintf("%s/(\\d+)", consumersKey))
 	for _, kvs := range resp.Kvs {
@@ -381,6 +430,7 @@ func (consumer *Consumer) getOtherConsumerInfo() {
 			log.Debug(key, "not match ", reg.String())
 		}
 	}
+	return
 }
 
 func (consumer *Consumer) addConsumer(consumerId uint32) {
@@ -407,40 +457,46 @@ func (consumer *Consumer) removeConsumer(consumerId uint32) {
 }
 
 // register consumer
-func (consumer *Consumer) registerConsumer() {
+func (consumer *Consumer) registerConsumer() (err error) {
 	key := fmt.Sprintf("/consumers/%s/ids/%d", consumer.GroupName, consumer.Id)
-	_, err := consumer.EtcdClient.Put(context.Background(),
+	_, err = consumer.EtcdClient.Put(context.Background(),
 		key, fmt.Sprintf("%d", consumer.Id), clientv3.WithLease(consumer.EtcdLeaseId))
 	if err != nil {
-		log.Fatalf("register consumer{%d} error, err: %v", consumer.Id, err)
+		log.Errorf("register consumer{%d} error, err: %v", consumer.Id, err)
+		return
 	}
 	log.Infof("register consumer{%d} success", consumer.Id)
+	return nil
 }
 
 // 连接etcd
-func (consumer *Consumer) connectEtcd() *clientv3.Client {
-	client, er := clientv3.New(clientv3.Config{Endpoints: consumer.EtcdEndpoints})
+func (consumer *Consumer) connectEtcd() (client *clientv3.Client, er error) {
+	client, er = clientv3.New(clientv3.Config{Endpoints: consumer.EtcdEndpoints})
 	if er != nil {
-		log.Fatalln("consumer connect etcd failed, err:", er)
+		log.Errorln("consumer connect etcd failed, err:", er)
+		return
 	}
-	return client
+	return client, nil
 }
 
-func (consumer *Consumer) createLeaseAndKeepAlive() {
+func (consumer *Consumer) createLeaseAndKeepAlive() (err error) {
 	// 1s
 	resp, err := consumer.EtcdClient.Grant(context.Background(), queue.LEASE_TTL)
 	if err != nil {
-		log.Fatalf("create etcd lease error err: %v", err)
+		log.Errorf("create etcd lease error err: %v", err)
+		return
 	}
 	_, err = consumer.EtcdClient.KeepAlive(context.Background(), resp.ID)
 	if err != nil {
-		log.Fatalf("keep lease alive error, err: %v", err)
+		log.Errorf("keep lease alive error, err: %v", err)
+		return
 	}
 	consumer.EtcdLeaseId = resp.ID
 	log.Infof("create leaseID{%v} success", resp.ID)
+	return
 }
 
-func (consumer *Consumer) getBrokerInfo() {
+func (consumer *Consumer) getBrokerInfo() (err error) {
 	// 获取broker并连接
 	log.Debugf("consumer{%d} scan broker", consumer.Id)
 	getResp, err := consumer.EtcdClient.Get(context.Background(), "/brokers/ids/", clientv3.WithPrefix())
@@ -449,8 +505,8 @@ func (consumer *Consumer) getBrokerInfo() {
 		return
 	}
 	if getResp.Count == 0 {
-		log.Debug("etcd not contain brokers")
-		return
+		log.Error("etcd not contain brokers")
+		return errors.New("not found brokers")
 	}
 	for _, kv := range getResp.Kvs {
 		log.Debugf("find broker {%s - %s}", string(kv.Key), string(kv.Value))
@@ -464,6 +520,7 @@ func (consumer *Consumer) getBrokerInfo() {
 		}
 		consumer.AddBroker(&queue.BrokerConfig{Name: brokerName, ListenerAddress: etcdBroker.Address})
 	}
+	return nil
 }
 
 // get topic partition leader
@@ -498,7 +555,6 @@ func (consumer *Consumer) getTopicInfo() {
 }
 
 // 初始化时获取各个分区的offset
-// TODO 应该是获取Assign的
 func (consumer *Consumer) getOffsetInfo() {
 	client := consumer.EtcdClient
 	for _, pi := range consumer.Assign {
@@ -522,7 +578,8 @@ func (consumer *Consumer) getOffsetInfo() {
 			}
 		}
 		pi.Offset = offset
-		log.Debugf("topic{%v} partition{%d} offset: %d", pi.Topic, pi.Partition, pi.Offset)
+		consumer.pullOffset[generateKey(pi.Topic, pi.Partition)] = offset
+		log.Debugf("[init] topic{%v} partition{%d} offset: %d", pi.Topic, pi.Partition, pi.Offset)
 	}
 }
 
@@ -552,7 +609,7 @@ func (consumer *Consumer) commitOffset(topic string, partition uint32, offset ui
 	return err
 }
 
-func (consumer *Consumer) registerLeaseConsumer() {
+func (consumer *Consumer) registerLeaseConsumer() (err error) {
 	groupKey := fmt.Sprintf("/consumers/%s", consumer.GroupName)
 	// 判断consumer group是否存在, 如果不存在则注册
 	resp, err := consumer.EtcdClient.Get(context.Background(), groupKey)
@@ -570,11 +627,13 @@ func (consumer *Consumer) registerLeaseConsumer() {
 			Topics:  consumer.SubscribeTopics}
 		groupValue, err := json.Marshal(cg)
 		if err != nil {
-			log.Fatalf("marshal consumer group error, err: %v", err)
+			log.Errorf("marshal consumer group error, err: %v", err)
+			return err
 		}
 		_, err = consumer.EtcdClient.Put(context.Background(), groupKey, string(groupValue))
 		if err != nil {
-			log.Fatalf("register consumer group error, err: %v", err)
+			log.Errorf("register consumer group error, err: %v", err)
+			return err
 		}
 	}
 
@@ -582,8 +641,9 @@ func (consumer *Consumer) registerLeaseConsumer() {
 	consumerKey := fmt.Sprintf("/consumers/%s/ids/%d", consumer.GroupName, consumer.Id)
 	_, err = consumer.EtcdClient.Put(context.Background(), consumerKey, "")
 	if err != nil {
-		log.Fatalf("register consumer %d error, err: %v", consumer.Id, err)
+		log.Errorf("register consumer %d error, err: %v", consumer.Id, err)
 	}
+	return
 }
 
 // 增加broker, 增加brokerServiceCLient

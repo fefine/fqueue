@@ -3,7 +3,7 @@ package fqueue
 const (
 	BROKER_FORMATER      = "/brokers/ids/%s"
 	TOPIC_PATTERN_PREFIX = "/brokers/topics/"
-	LEASE_TTL            = 1
+	LEASE_TTL            = 100
 )
 
 type EtcdTopic struct {
