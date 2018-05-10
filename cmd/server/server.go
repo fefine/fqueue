@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"fqueue"
+	"github.com/fefine/fqueue"
 	log "github.com/sirupsen/logrus"
 	"os"
 	"os/signal"
