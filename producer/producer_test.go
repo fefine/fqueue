@@ -3,7 +3,7 @@ package producer
 import (
 	"context"
 	"fmt"
-	"fqueue"
+	queue "github.com/fefine/fqueue"
 	"math/rand"
 	"testing"
 	"time"
@@ -20,9 +20,10 @@ func TestNewProducer(t *testing.T) {
 	// not provide partition
 	kvs := createKV(count, 100)
 	for i := 0; i < count; i++ {
-		producer.Push(context.Background(), "local-topic", []byte(kvs[i*2]), []byte(kvs[i*2+1]), func(msg *sendMsg, resp *fqueue.Resp, e error) {
-			fmt.Printf("topic: %s partition: %d key: %s value: %s\n", msg.topic, msg.partition, string(msg.key), string(msg.value))
-		})
+		producer.Push(context.Background(), "local-topic", []byte(kvs[i*2]), []byte(kvs[i*2+1]),
+			func(msg *sendMsg, resp *queue.Resp, e error) {
+				fmt.Printf("topic: %s partition: %d key: %s value: %s\n", msg.topic, msg.partition, string(msg.key), string(msg.value))
+			})
 		//producer.Push(context.Background(), "local-topic", []byte(kvs[i * 2]), []byte(kvs[i * 2 + 1]))
 		time.Sleep(time.Millisecond * 100)
 	}

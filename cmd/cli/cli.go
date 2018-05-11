@@ -35,14 +35,6 @@ func main() {
 	flag.UintVar(&replica, "replicaCount", 0, "topic partition replicate count")
 	flag.Parse()
 
-	log.Println("endpoint: \t", endpoint)
-	log.Println("topic: \t", topic)
-	log.Println("create: \t", create)
-	log.Println("list: \t", listTopic)
-	log.Println("name: \t", name)
-	log.Println("partition: \t", partition)
-	log.Println("replica: \t", replica)
-
 	if topic {
 		if listTopic {
 			listTopics(strings.Split(endpoint, ","), name)
