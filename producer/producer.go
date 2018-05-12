@@ -15,6 +15,10 @@ import (
 	"strings"
 )
 
+var (
+	NoBrokersError = errors.New("not found brokers")
+)
+
 type Partitioner interface {
 	Partition(topic string, key, value []byte, leader *queue.TopicPartitionLeader) uint32
 }
@@ -29,7 +33,7 @@ func (part DefaultPartitioner) Partition(topic string, key, value []byte, leader
 	return 0
 }
 
-type Callback func(*sendMsg, *queue.Resp, error)
+type Callback func(*SendMsg, *queue.Resp, error)
 
 // producer
 type Producer struct {
@@ -38,9 +42,9 @@ type Producer struct {
 	Brokers       map[string]*queue.BrokerMember
 	Topics        map[string]*queue.TopicPartitionLeader
 	Partitioner   func(string, []byte, []byte, *queue.TopicPartitionLeader) uint32
-	msgChan       chan *sendMsg
+	msgChan       chan *SendMsg
 	BatchCount    uint32
-	bufferedMsgs  map[string][]*sendMsg
+	bufferedMsgs  map[string][]*SendMsg
 }
 
 type ProducerConfig struct {
@@ -50,7 +54,7 @@ type ProducerConfig struct {
 	BatchCount    uint32
 }
 
-type sendMsg struct {
+type SendMsg struct {
 	key       []byte
 	value     []byte
 	topic     string
@@ -77,8 +81,8 @@ func NewProducer(config *ProducerConfig) (producer *Producer, err error) {
 	producer.BatchCount = config.BatchCount
 	producer.Brokers = make(map[string]*queue.BrokerMember)
 	producer.Topics = make(map[string]*queue.TopicPartitionLeader)
-	producer.msgChan = make(chan *sendMsg, queue.DEFAULT_CHAN_COUNT)
-	producer.bufferedMsgs = make(map[string][]*sendMsg)
+	producer.msgChan = make(chan *SendMsg, queue.DEFAULT_CHAN_COUNT)
+	producer.bufferedMsgs = make(map[string][]*SendMsg)
 
 	if config.Partitioner != nil {
 		producer.Partitioner = config.Partitioner.Partition
@@ -86,14 +90,18 @@ func NewProducer(config *ProducerConfig) (producer *Producer, err error) {
 		producer.Partitioner = DefaultPartitioner{}.Partition
 	}
 
-	// TODO 1, connect etcd
+	// 1, connect etcd
 	producer.etcdClient, err = producer.connectEtcd()
 	if err != nil {
 		return
 	}
-	// TODO 2, get brokers
-	producer.getBrokerInfo()
-	// TODO 3, watch partition leaders
+	// 2, get brokers, 如果不存在
+	err = producer.getBrokerInfo()
+	if err != nil {
+		producer.etcdClient.Close()
+		return
+	}
+	// 3, watch partition leaders
 	go producer.watchLeaderAndBroker()
 
 	go producer.bufferedMsg()
@@ -114,7 +122,7 @@ func (producer *Producer) bufferedMsg() {
 				sms = append(sms, sm)
 				producer.bufferedMsgs[generatorKey(topic, partition)] = sms
 			} else {
-				sms = make([]*sendMsg, 0, producer.BatchCount)
+				sms = make([]*SendMsg, 0, producer.BatchCount)
 				sms = append(sms, sm)
 				producer.bufferedMsgs[generatorKey(topic, partition)] = sms
 			}
@@ -144,7 +152,7 @@ func (producer *Producer) Flush() {
 	}
 }
 
-func (producer *Producer) sendReq(sms []*sendMsg) (*queue.Resp, error) {
+func (producer *Producer) sendReq(sms []*SendMsg) (*queue.Resp, error) {
 	mb := new(queue.MsgBatch)
 	mb.Topic = sms[0].topic
 	mb.Partition = sms[0].partition
@@ -209,7 +217,7 @@ func (producer *Producer) PushWithPartition(ctx context.Context,
 		return err
 	}
 
-	sm := &sendMsg{topic: topic, partition: partition, key: key, value: value, callback: callback}
+	sm := &SendMsg{topic: topic, partition: partition, key: key, value: value, callback: callback}
 	select {
 	case producer.msgChan <- sm:
 		return nil
@@ -247,17 +255,17 @@ func (producer *Producer) topicInfo(topic string) (*queue.TopicPartitionLeader, 
 	}
 }
 
-func (producer *Producer) getBrokerInfo() {
+func (producer *Producer) getBrokerInfo() error {
 	// 获取broker并连接
 	log.Debugf("producer scan broker")
 	getResp, err := producer.etcdClient.Get(context.Background(), "/brokers/ids/", clientv3.WithPrefix())
 	if err != nil {
 		log.Errorf("scan broker info error, err: %v", err)
-		return
+		return err
 	}
 	if getResp.Count == 0 {
-		log.Debug("etcd not contain brokers")
-		return
+		log.Error("not found brokers")
+		return NoBrokersError
 	}
 	for _, kv := range getResp.Kvs {
 		log.Debugf("find broker {%s - %s}", string(kv.Key), string(kv.Value))
@@ -273,6 +281,7 @@ func (producer *Producer) getBrokerInfo() {
 		producer.Brokers[brokerName] = broker
 		log.Debugf("add new broker{%v}", broker)
 	}
+	return nil
 }
 
 func (producer *Producer) appendTopicInfo(name string) error {
@@ -370,4 +379,9 @@ func (producer *Producer) watchLeaderAndBroker() {
 			}
 		}
 	}
+}
+
+func (producer *Producer) Close() {
+	producer.etcdClient.Close()
+	log.Info("producer close")
 }
