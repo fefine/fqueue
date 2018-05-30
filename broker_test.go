@@ -39,6 +39,36 @@ func TestSingleBrokerAndStart(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	broker.Close()
 }
+// 单broker-1
+func TestSingleBroker1AndStart(t *testing.T) {
+	port := 8090
+	config := DefaultBrokerConfig(1, port)
+	broker, err := NewBrokerAndStart(config)
+	NoError(t, err)
+	time.Sleep(3 * time.Second)
+	waitSignal()
+	broker.Close()
+}
+
+func TestSingleBroker2AndStart(t *testing.T) {
+	port := 8091
+	config := DefaultBrokerConfig(2, port)
+	broker, err := NewBrokerAndStart(config)
+	NoError(t, err)
+	time.Sleep(3 * time.Second)
+	waitSignal()
+	broker.Close()
+}
+
+func TestSingleBroker3AndStart(t *testing.T) {
+	port := 8092
+	config := DefaultBrokerConfig(3, port)
+	broker, err := NewBrokerAndStart(config)
+	NoError(t, err)
+	time.Sleep(3 * time.Second)
+	waitSignal()
+	broker.Close()
+}
 
 // 多broker
 func TestMultiBrokerAndStart(t *testing.T) {
@@ -54,15 +84,16 @@ func TestMultiBrokerAndStart(t *testing.T) {
 	time.Sleep(time.Second)
 	// 创建topic
 	///*
-	//client := GetBrokerServiceClient(t, port)
-	//topic := "local-topic"
-	//pCount := 10
-	//time.Sleep(time.Second)
-	//CreateTopic(t, client, topic, pCount, 2)
-	//time.Sleep(1 * time.Second)
+	client := GetBrokerServiceClient(t, port)
+	topic := "local-topic"
+	pCount := 10
+	time.Sleep(time.Second)
+	CreateTopic(t, client, topic, pCount, 2)
+	time.Sleep(1 * time.Second)
 	//*/
 	// 移除broker
 	//broker2.Close()
+
 	// 发送消息
 	//Push(t, client, topic, pCount)
 	//time.Sleep(1 * time.Second)

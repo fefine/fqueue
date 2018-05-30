@@ -142,7 +142,10 @@ func NewConsumer(config *ConsumerConfig) (consumer *Consumer, err error) {
 	if err != nil {
 		return
 	}
-	consumer.getTopicInfo()
+	err = consumer.getTopicInfo()
+	if err != nil {
+		return
+	}
 	// 3，注册consumer信息
 	err = consumer.registerConsumer()
 	if err != nil {
@@ -232,16 +235,19 @@ func (consumer *Consumer) syncPullMessage() error {
 			return err
 		}
 		if len(mb.Msgs) > 0 {
-			log.Debugf("recv topic{%s} partition{%d} startOffset{%d} count{%d}",
-				mb.Topic, mb.Partition, mb.StartOffset, len(mb.Msgs))
+			//log.Debugf("recv topic{%s} partition{%d} startOffset{%d} count{%d}",
+			//	mb.Topic, mb.Partition, mb.StartOffset, len(mb.Msgs))
 			msgs := convertMessage(mb)
 			// 满了之后会阻塞
 			// 添加pullMap
 			consumer.msgBatchChan <- msgs
 			newOffset := msgs.Messages[len(mb.Msgs)-1].Offset + 1
 			consumer.pullOffset[generateKey(msgs.Topic, msgs.Partition)] = newOffset
-			log.Debugf("recv topic{%s} partition{%d} newOffset{%d}",
-				mb.Topic, mb.Partition, newOffset)
+			log.Debugf("recv topic{%s} partition{%d} startOffset{%d} newOffset{%d}",
+				mb.Topic, mb.Partition, mb.StartOffset, newOffset)
+			for _, m := range msgs.Messages {
+				log.Debug(m)
+			}
 		}
 	}
 }
@@ -524,7 +530,7 @@ func (consumer *Consumer) getBrokerInfo() (err error) {
 }
 
 // get topic partition leader
-func (consumer *Consumer) getTopicInfo() {
+func (consumer *Consumer) getTopicInfo() (err error) {
 
 	consumer.SubscribeMutex.Lock()
 	defer consumer.SubscribeMutex.Unlock()
@@ -535,7 +541,7 @@ func (consumer *Consumer) getTopicInfo() {
 		resp, err := client.Get(context.Background(), topicKey, clientv3.WithPrefix())
 		if err != nil {
 			log.Errorf("get topic{%s} partition info error, err: %v", topic, err)
-			continue
+			return err
 		}
 		if resp.Count > 0 {
 			for _, kvs := range resp.Kvs {
@@ -550,8 +556,10 @@ func (consumer *Consumer) getTopicInfo() {
 			}
 		} else {
 			log.Warnf("topic {%s} not contains partition", topic)
+			return errors.New(fmt.Sprintf("topic {%s} not found paritions", topic))
 		}
 	}
+	return
 }
 
 // 初始化时获取各个分区的offset

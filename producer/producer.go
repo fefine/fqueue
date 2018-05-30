@@ -13,6 +13,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	DefaultTimeout = 6 * time.Second
 )
 
 var (
@@ -106,35 +111,38 @@ func NewProducer(config *ProducerConfig) (producer *Producer, err error) {
 
 	go producer.bufferedMsg()
 
-	log.Info("consumer start")
+	log.Info("producer start")
 	return
 }
 
 // 暂存, 批量发送
 func (producer *Producer) bufferedMsg() {
-	var bufferedCount uint32 = 0
 	for {
 		select {
 		case sm := <-producer.msgChan:
 			topic := sm.topic
 			partition := sm.partition
-			if sms, ok := producer.bufferedMsgs[generatorKey(topic, partition)]; ok {
+			key := generatorKey(topic, partition)
+			var sms []*SendMsg
+			ok := false
+			if sms, ok = producer.bufferedMsgs[key]; ok {
 				sms = append(sms, sm)
-				producer.bufferedMsgs[generatorKey(topic, partition)] = sms
+				producer.bufferedMsgs[key] = sms
 			} else {
 				sms = make([]*SendMsg, 0, producer.BatchCount)
 				sms = append(sms, sm)
-				producer.bufferedMsgs[generatorKey(topic, partition)] = sms
+				producer.bufferedMsgs[key] = sms
 			}
-			bufferedCount++
-		}
-		if bufferedCount >= producer.BatchCount {
-			producer.Flush()
-			bufferedCount = 0
+			// 如果单个分区的消息数量很多，直接发送
+			if uint32(len(sms)) >= producer.BatchCount {
+				// TODO 目前是串行模式
+				producer.flush(key)
+			}
 		}
 	}
 }
 
+// 把所有暂存的消息发送
 func (producer *Producer) Flush() {
 	for key, sms := range producer.bufferedMsgs {
 		//delete(producer.bufferedMsgs, key)
@@ -152,6 +160,24 @@ func (producer *Producer) Flush() {
 	}
 }
 
+// 发送单个分区的消息
+func (producer *Producer) flush(key string) {
+	sms, ok := producer.bufferedMsgs[key]
+	if ok {
+		if len(sms) == 0 {
+			return
+		}
+		resp, err := producer.sendReq(sms)
+		producer.bufferedMsgs[key] = producer.bufferedMsgs[key][:0]
+		for _, sm := range sms {
+			if sm.callback != nil {
+				sm.callback(sm, resp, err)
+			}
+		}
+	}
+}
+
+// 将多个消息合并成一个请求，会造成一起失败的问题
 func (producer *Producer) sendReq(sms []*SendMsg) (*queue.Resp, error) {
 	mb := new(queue.MsgBatch)
 	mb.Topic = sms[0].topic
@@ -168,7 +194,8 @@ func (producer *Producer) sendReq(sms []*SendMsg) (*queue.Resp, error) {
 		log.Error(err)
 		return nil, err
 	}
-	pushClient, err := client.Push(context.Background())
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+	pushClient, err := client.Push(ctx)
 	if err != nil {
 		log.Error(err)
 		return nil, err
@@ -184,6 +211,7 @@ func (producer *Producer) sendReq(sms []*SendMsg) (*queue.Resp, error) {
 	return resp, err
 }
 
+// 发送消息
 func (producer *Producer) Push(ctx context.Context, topic string, key []byte, value []byte, callback Callback) error {
 	tpl, err := producer.topicInfo(topic)
 	if err != nil {
@@ -198,6 +226,7 @@ func (producer *Producer) Push(ctx context.Context, topic string, key []byte, va
 	return producer.PushWithPartition(ctx, topic, partition, key, value, callback)
 }
 
+// 发送时提供partition
 func (producer *Producer) PushWithPartition(ctx context.Context,
 	topic string, partition uint32, key []byte, value []byte, callback Callback) error {
 
@@ -325,7 +354,7 @@ func (producer *Producer) getBrokerClient(broker *queue.BrokerMember) (queue.Bro
 }
 
 func (producer *Producer) watchLeaderAndBroker() {
-	log.Debug("watch consumers and brokers")
+	log.Debug("watch leader and brokers")
 	watchChan := producer.etcdClient.Watch(context.Background(), "/", clientv3.WithPrefix())
 	brokerPattern, _ := regexp.Compile("^/brokers/ids/([\\w\\d_-]+)$")
 	leaderParttern, _ := regexp.Compile("^/brokers/topics/([\\w\\d_-]+)/partitions/(\\d+)/leader$")

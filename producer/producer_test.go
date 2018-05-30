@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	queue "github.com/fefine/fqueue"
-	"math/rand"
 	"testing"
 	"time"
+	"bytes"
 )
 
 func TestNewProducer(t *testing.T) {
@@ -15,12 +15,12 @@ func TestNewProducer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count := 3
+	count := 300
 
 	// not provide partition
 	kvs := createKV(count, 100)
 	for i := 0; i < count; i++ {
-		producer.Push(context.Background(), "local-topic", []byte(kvs[i*2]), []byte(kvs[i*2+1]),
+		producer.Push(context.Background(), "local-topic", []byte(kvs[i<<1]), []byte(kvs[i<<1+1]),
 			func(msg *SendMsg, resp *queue.Resp, e error) {
 				fmt.Printf("topic: %s partition: %d key: %s value: %s\n", msg.topic, msg.partition, string(msg.key), string(msg.value))
 			})
@@ -34,13 +34,14 @@ func TestNewProducer(t *testing.T) {
 
 func createKV(count, size int) []string {
 	res := make([]string, count*2)
+	var buffer bytes.Buffer
 	for i := 0; i < count; i++ {
 		res[i*2] = fmt.Sprintf("this is key - %d", i)
-		value := make([]byte, size)
 		for j := 0; j < size; j++ {
-			value[j] = byte(rand.Int())
+			buffer.WriteString(string('a' + (j % 26)))
 		}
-		res[i*2+1] = string(value)
+		res[i*2+1] = buffer.String()
+		buffer.Reset()
 	}
 	return res
 }

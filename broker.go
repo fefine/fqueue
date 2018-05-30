@@ -22,6 +22,7 @@ const (
 	MAX_SEND_COUNT     = 1000
 	DEFAULT_CHAN_COUNT = 10
 	VERSION            = 0x01
+	DefaultTimeout            = 6 * time.Second
 )
 
 type BrokerConfig struct {
@@ -188,7 +189,9 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 }
 
 func (broker *Broker) checkBrokerExist() {
-	resp, err := broker.etcdClient.Get(context.Background(), fmt.Sprintf("/brokers/ids/%s", broker.Name))
+	ctx, fun := context.WithTimeout(context.Background(), DefaultTimeout)
+	defer fun()
+	resp, err := broker.etcdClient.Get(ctx, fmt.Sprintf("/brokers/ids/%s", broker.Name))
 	if err != nil {
 		log.Error(err)
 		return
@@ -202,7 +205,9 @@ func (broker *Broker) checkBrokerExist() {
 // 扫描并且连接其他broker
 func (broker *Broker) scanAndConnectOtherBroker() {
 	log.Debugf("%s scan broker", broker.Name)
-	getResp, err := broker.etcdClient.Get(context.Background(), "/brokers/ids/", clientv3.WithPrefix())
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
+	defer cancel()
+	getResp, err := broker.etcdClient.Get(ctx, "/brokers/ids/", clientv3.WithPrefix())
 	if err != nil {
 		log.Errorf("scan broker info error, err: %v", err)
 		return
@@ -233,7 +238,9 @@ func (broker *Broker) scanAndConnectOtherBroker() {
 func (broker *Broker) watchEtcd() {
 	// watch brokers
 	//watchChan := broker.etcdClient.Watch(context.Background(), "/brokers", clientv3.WithPrefix(), clientv3.WithPrevKV())
-	watchChan := broker.etcdClient.Watch(context.Background(), "/brokers", clientv3.WithPrefix())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watchChan := broker.etcdClient.Watch(ctx, "/brokers", clientv3.WithPrefix())
 	for watchResp := range watchChan {
 		if watchResp.Canceled {
 			log.Error(watchResp.Err())
@@ -283,15 +290,22 @@ func (broker *Broker) checkoutOrCreateLeader() {
 	for _, tp := range broker.topicPartitions {
 		for _, p := range tp.Partition {
 			leader := fmt.Sprintf("brokers/topics/%s/partitions/%d/leader", tp.Topic, p)
-			resp, err := broker.etcdClient.Get(context.Background(), leader)
+			ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+			resp, err := broker.etcdClient.Get(ctx, leader)
 			if err != nil {
 				log.Errorf("get topic %s, part: %d leader failed, err: %v", tp.Topic, p, err)
-				broker.tryToBecomePartitionLeader(TopicPartition{Topic: tp.Topic, Partition: []uint32{p}})
+				//broker.tryToBecomePartitionLeader(TopicPartition{Topic: tp.Topic, Partition: []uint32{p}})
 				continue
 			}
 			if resp.Count == 0 {
 				log.Errorf("get topic %s, part: %d leader failed, broker %s tye to become the leader",
 					tp.Topic, p, broker.Name)
+				// TODO 首先需要判断本broker是否包含这个分区
+				// 判断是否领导这个分区
+				if !broker.isLeaderPartition(tp.Topic, p) {
+					log.Warnf("broker{%s} not lead topic{%s} partition{%d}", broker.Name, tp.Topic, p)
+					continue
+				}
 				broker.tryToBecomePartitionLeader(TopicPartition{Topic: tp.Topic, Partition: []uint32{p}})
 			}
 		}
@@ -304,7 +318,8 @@ func (broker *Broker) tryToBecomePartitionLeader(tp TopicPartition) {
 		key := fmt.Sprintf("/brokers/topics/%s/partitions/%d/leader", tp.Topic, p)
 		value := broker.Name
 		kvc := clientv3.NewKV(broker.etcdClient)
-		tr, err := kvc.Txn(context.Background()).
+		ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+		tr, err := kvc.Txn(ctx).
 			If(clientv3.Compare(clientv3.ModRevision(key), "=", 0)).
 			Then(clientv3.OpPut(key, value, clientv3.WithLease(broker.etcdLeaseId))).
 			Commit()
@@ -313,11 +328,12 @@ func (broker *Broker) tryToBecomePartitionLeader(tp TopicPartition) {
 			continue
 		}
 		if tr.Succeeded {
-			log.Debug("update leader success, topic: %s, part: %d", tp.Topic, p)
+			log.Debugf("update leader success, topic: %s, part: %d", tp.Topic, p)
 			broker.becomePartitionLeader(TopicPartition{Topic: tp.Topic, Partition: []uint32{p}})
 			// 更新state
 			key = fmt.Sprintf("/brokers/topics/%s/partitions/%d/state", tp.Topic, p)
-			_, err := broker.etcdClient.Put(context.Background(), key, value)
+			ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+			_, err := broker.etcdClient.Put(ctx, key, value)
 			if err != nil {
 				log.Errorf("update leader state error, err: %v", err)
 				continue
@@ -329,7 +345,8 @@ func (broker *Broker) tryToBecomePartitionLeader(tp TopicPartition) {
 
 // 扫描所有topic的信息: broker包含的所有topic, broker领导的所有partition
 func (broker *Broker) scanAndCreateTopic() {
-	getResp, err := broker.etcdClient.Get(context.Background(), "/brokers/topics/", clientv3.WithPrefix())
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+	getResp, err := broker.etcdClient.Get(ctx, "/brokers/topics/", clientv3.WithPrefix())
 	if err != nil {
 		log.Errorf("scan topic info error, err: %v", err)
 		return
@@ -354,7 +371,7 @@ func (broker *Broker) scanAndCreateTopic() {
 			// 忽略version
 			// 找到此broker保存的topic-partitions
 			for part, bs := range topic.Partitions {
-				log.Debugf("{%s} - topic: %s part: %d brokers: %v", broker.Name, topic, part, bs)
+				log.Debugf("{%s} - topic: %v part: %d brokers: %v", broker.Name, tName, part, bs)
 				broker.UpdatePartitionBrokers(TopicPartition{Topic: tName, Partition: []uint32{part}}, bs, true)
 				for _, b := range bs {
 					if b == broker.Name {
@@ -379,14 +396,15 @@ func (broker *Broker) scanAndCreateTopic() {
 				broker.topicPartitionLeader[GeneratorKey(topic, uint32(partition))] = leader
 			}
 		} else {
-			log.Errorf("wrong etcd key: %s value: %v", key, string(kv.Value))
+			log.Debugf("jump etcd key: %s value: %v", key, string(kv.Value))
 		}
 	}
 }
 
 // 扫描某一个topic
 func (broker *Broker) scanTopic(topicName string) {
-	getResp, err := broker.etcdClient.Get(context.Background(), fmt.Sprintf("/brokers/topics/%s", topicName))
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+	getResp, err := broker.etcdClient.Get(ctx, fmt.Sprintf("/brokers/topics/%s", topicName))
 	if err != nil {
 		log.Errorf("scan topic info error, err: %v", err)
 		return
@@ -416,7 +434,8 @@ func (broker *Broker) scanTopic(topicName string) {
 
 func (broker *Broker) checkTopic(topic string) error {
 	key := fmt.Sprintf("/brokers/topics/%s", topic)
-	resp, err := broker.etcdClient.Get(context.Background(), key)
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+	resp, err := broker.etcdClient.Get(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -428,8 +447,10 @@ func (broker *Broker) checkTopic(topic string) error {
 
 // 创建leaseID
 func (broker *Broker) createLeaseAndKeepAlive() {
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+
 	// 1s
-	resp, err := broker.etcdClient.Grant(context.Background(), LEASE_TTL)
+	resp, err := broker.etcdClient.Grant(ctx, LEASE_TTL)
 	if err != nil {
 		log.Fatalf("create etcd lease error err: %v", err)
 	}
@@ -450,7 +471,9 @@ func (broker *Broker) registerBroker() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	_, err = broker.etcdClient.Put(context.Background(), key, string(value), clientv3.WithLease(broker.etcdLeaseId))
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+
+	_, err = broker.etcdClient.Put(ctx, key, string(value), clientv3.WithLease(broker.etcdLeaseId))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -535,8 +558,14 @@ func (broker *Broker) appendToSlaveBroker(batch *MsgBatch) error {
 				continue
 			}
 			log.Debugf("append log to broker %s, key %s", clientName, key)
+			// 当broker宕机时，broker已经从clients中移除，因此这里需要进行判断
+			if _, ok := broker.brokerClients[clientName]; !ok {
+				log.Warnf("append log to broker %s, key %s, but broker clint not found", clientName, key)
+				continue
+			}
 			client := broker.brokerClients[clientName].Client
-			appendClient, err := client.Append(context.Background())
+			ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+			appendClient, err := client.Append(ctx)
 			if err != nil {
 				log.Error("[append] get client error")
 				continue
@@ -570,8 +599,10 @@ func (broker *Broker) createTopic(t string, assignPartitions, leadPartitions []u
 	for _, p := range leadPartitions {
 		key := fmt.Sprintf("/brokers/topics/%s/partitions/%d", t, p)
 		value := broker.Name
-		broker.etcdClient.Put(context.Background(), fmt.Sprintf("%s/state", key), value)
-		broker.etcdClient.Put(context.Background(), fmt.Sprintf("%s/leader", key), value,
+		ctx1, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+		ctx2, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+		broker.etcdClient.Put(ctx1, fmt.Sprintf("%s/state", key), value)
+		broker.etcdClient.Put(ctx2, fmt.Sprintf("%s/leader", key), value,
 			clientv3.WithLease(broker.etcdLeaseId))
 	}
 	return
@@ -892,7 +923,8 @@ func (bss *brokerServiceServer) putTopic(topic string, partitionCount int) {
 	}
 	key := fmt.Sprintf("/brokers/topics/%s", topic)
 	value, _ := json.Marshal(etcdTopic)
-	bss.broker.etcdClient.Put(context.Background(), key, string(value))
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+	bss.broker.etcdClient.Put(ctx, key, string(value))
 }
 
 // 计算分区分配
