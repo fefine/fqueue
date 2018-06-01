@@ -1,0 +1,41 @@
+syntax = "proto3";
+package simple_rpc;
+
+service ChatServer {
+    rpc Send(Msg) returns (MsgResp) {}
+
+    rpc SendStream(stream Msg) returns (MsgResp) {}
+
+    rpc RecvStream(Msg) returns (stream MsgResp) {}
+
+    rpc AllStream(stream Msg) returns (stream MsgResp) {}
+}
+
+message Msg {
+    // from
+    int32 fid = 1;
+    // to
+    int32 tid = 2;
+    // message
+    string msg = 3;
+    // type
+    MessageType type = 4;
+    // send time
+    int64 time = 5;
+}
+
+message MsgResp {
+    RespType type = 1;
+    // if type == error, resp is error msg
+    string resp = 2;
+}
+
+enum MessageType {
+    PRIMARY = 0;
+    GROUP = 1;
+}
+
+enum RespType {
+    OK = 0;
+    ERROR = 1;
+}
