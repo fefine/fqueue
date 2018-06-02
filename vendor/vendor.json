@@ -45,8 +45,11 @@
 			"revisionTime": "2018-01-08T23:06:52Z"
 		},
 		{
+			"checksumSHA1": "evD/9aLjga2GUWXcaQppT9Fblmg=",
 			"path": "github.com/fefine/fqueue",
-			"revision": ""
+			"revision": "cbe45db3a9cee04185a812c4e5e9f3b4441174f1",
+			"revisionTime": "2018-06-01T13:13:01Z",
+			"tree": true
 		},
 		{
 			"checksumSHA1": "CjHi1eSZSG4tGIwrngR9o3V8cL4=",
