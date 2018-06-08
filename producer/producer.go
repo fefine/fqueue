@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
-	queue "github.com/fefine/fqueue"
+	queue "fqueue"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"regexp"

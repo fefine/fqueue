@@ -148,7 +148,7 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 	// 这里可以用加密, 暂不提供
 	grpcServer := grpc.NewServer()
 	RegisterBrokerServiceServer(grpcServer, NewBrokerServerServer(broker, broker.AppendMsgChan))
-	log.Infof("broker {%s} rpc server start!", broker.Name)
+	log.Info("rpc server start!")
 
 	go grpcServer.Serve(rpcLis)
 
@@ -189,8 +189,8 @@ func NewBrokerAndStart(config *BrokerConfig) (broker *Broker, err error) {
 }
 
 func (broker *Broker) checkBrokerExist() {
-	ctx, fun := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer fun()
+	ctx, _ := context.WithTimeout(context.Background(), DefaultTimeout)
+	//defer fun()
 	resp, err := broker.etcdClient.Get(ctx, fmt.Sprintf("/brokers/ids/%s", broker.Name))
 	if err != nil {
 		log.Error(err)
@@ -995,7 +995,7 @@ func (bss *brokerServiceServer) Subscribe(ctx context.Context, req *SubReq) (*Su
 func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_PullServer) error {
 	// 如何均匀的从各个分区进行取数据, 只pull leader分区的的msg
 	// client请求的时候会携带分区信息
-	log.Debug("[GRPC] Pull")
+	//log.Debug("[GRPC] Pull")
 	broker := bss.broker
 	topic := req.TpSet.Topic
 	partitionOffset := req.TpSet.PartitionOffset
@@ -1011,7 +1011,7 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 		delta := 0
 		msgBatchs := make([]*MsgBatch, 0, partitionCount)
 		for part, offset := range partitionOffset {
-			log.Debugf("pull topic{%s} partition{%d} count{%d} startOffset{%d}", topic, part, aveCount, offset)
+			//log.Debugf("pull topic{%s} partition{%d} count{%d} startOffset{%d}", topic, part, aveCount, offset)
 			key := GeneratorKey(topic, part)
 			if have, ok := broker.leaderPartitions[key]; !ok || !have {
 				err := errors.New("this broker don't lead this partition")
@@ -1035,7 +1035,7 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 			partitionOffset[part] += uint64(l)
 		}
 		if len(msgBatchs) == 0 {
-			log.Debug("no more data")
+			//log.Debug("no more data")
 		}
 		msgChan <- msgBatchs
 		return
@@ -1078,7 +1078,7 @@ func (bss *brokerServiceServer) Pull(req *PullReq, pullServer BrokerService_Pull
 		case err := <-errChan:
 			log.Error(err)
 		default:
-			log.Debug("pull no more data")
+			//log.Debug("pull no more data")
 		}
 	}
 	return nil

@@ -409,7 +409,7 @@ func (p *FilePartition) ReadMsg(offset uint64) (msg []byte, err error) {
 
 // 当数量不够时，读取多少返回多少
 func (p *FilePartition) ReadMultiMsg(offset uint64, size uint32) (msgs [][]byte, err error) {
-	log.Debugf("partition-%d newOffset: %d", p.Id, p.LatestMsgOffset)
+	//log.Debugf("partition-%d newOffset: %d", p.Id, p.LatestMsgOffset)
 	msgs = make([][]byte, 0, size)
 	for i := 0; i < int(size); i++ {
 		msg, err := p.ReadMsg(offset + uint64(i))

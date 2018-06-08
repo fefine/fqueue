@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
-	queue "github.com/fefine/fqueue"
+	queue "fqueue"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"io"
@@ -208,6 +208,10 @@ func (consumer *Consumer) asyncPullMessage() {
 func (consumer *Consumer) syncPullMessage() error {
 	//consumer.AssignMutex.Lock()
 	//defer consumer.AssignMutex.Unlock()
+	if len(consumer.Assign) == 0 {
+		// 正在进行其他操作
+		return nil
+	}
 	partitionInfo := consumer.Assign[consumer.partitionIndex%len(consumer.Assign)]
 	client := consumer.Brokers[partitionInfo.Leader]
 	po := make(map[uint32]uint64)
@@ -215,8 +219,8 @@ func (consumer *Consumer) syncPullMessage() error {
 	po[partitionInfo.Partition] = consumer.pullOffset[generateKey(partitionInfo.Topic, partitionInfo.Partition)]
 	topicPartitionOffset := &queue.TopicPartitionOffset{Topic: partitionInfo.Topic, PartitionOffset: po}
 	req := &queue.PullReq{Count: PULL_COUNT, Timeout: 0, TpSet: topicPartitionOffset}
-	log.Debugf("pull topic{%s} partition{%d} offset{%d} count{%d}",
-		partitionInfo.Topic, partitionInfo.Partition, partitionInfo.Offset, PULL_COUNT)
+	//log.Debugf("pull topic{%s} partition{%d} offset{%d} count{%d}",
+	//	partitionInfo.Topic, partitionInfo.Partition, partitionInfo.Offset, PULL_COUNT)
 	resp, err := client.Client.Pull(context.Background(), req)
 	if err != nil {
 		log.Error("sync pull message error, err: ", err)
@@ -224,8 +228,8 @@ func (consumer *Consumer) syncPullMessage() error {
 	}
 	for {
 		mb, err := resp.Recv()
+		resp.CloseSend()
 		if err != nil {
-			resp.CloseSend()
 			if err == io.EOF {
 				consumer.partitionIndex++
 				return nil
@@ -245,10 +249,11 @@ func (consumer *Consumer) syncPullMessage() error {
 			consumer.pullOffset[generateKey(msgs.Topic, msgs.Partition)] = newOffset
 			log.Debugf("recv topic{%s} partition{%d} startOffset{%d} newOffset{%d}",
 				mb.Topic, mb.Partition, mb.StartOffset, newOffset)
-			for _, m := range msgs.Messages {
-				log.Debug(m)
-			}
+			//for _, m := range msgs.Messages {
+			//	log.Debug(m)
+			//}
 		}
+
 	}
 }
 
@@ -270,7 +275,7 @@ func (consumer *Consumer) watchConsumerAndBroker() {
 					// add consumer
 					if consumerPattern.Match(event.Kv.Key) {
 						matcheGroups := consumerPattern.FindStringSubmatch(string(event.Kv.Key))
-						consumerId, _ := strconv.ParseUint(matcheGroups[2], 10, 32)
+						consumerId, _ := strconv.ParseUint(matcheGroups[1], 10, 32)
 						consumer.addConsumer(uint32(consumerId))
 						consumer.ReassignPartition()
 						continue
@@ -306,7 +311,7 @@ func (consumer *Consumer) watchConsumerAndBroker() {
 					// add consumer
 					if consumerPattern.Match(event.Kv.Key) {
 						matcheGroups := consumerPattern.FindStringSubmatch(string(event.Kv.Key))
-						consumerId, _ := strconv.ParseUint(matcheGroups[2], 10, 32)
+						consumerId, _ := strconv.ParseUint(matcheGroups[1], 10, 32)
 						consumer.removeConsumer(uint32(consumerId))
 						consumer.ReassignPartition()
 						continue
@@ -367,29 +372,27 @@ func (consumer *Consumer) ReassignPartition() {
 			return cs[i].Partition < cs[j].Partition
 		}
 	})
-
+	log.Debugf("\nconsumers: %v \nparitions: %v", consumer.consumers, consumer.Subscribe)
 	n := len(cs) / len(consumer.consumers)
-	position := sort.Search(len(consumer.consumers), func(i int) bool {
-		return consumer.consumers[i] == consumer.Id
-	})
+	var position = -1
+	for i, v := range consumer.consumers {
+		if v == consumer.Id {
+			position = i
+		}
+	}
+
 	last := len(cs) % len(consumer.consumers)
-	if last == 0 {
-		for i := position * n; i < (position+1)*n; i++ {
+	// 不能除尽并且为最后一个
+	if last != 0 && position == len(consumer.consumers) - 1 {
+		for i := position * n; i < (position+1) * n + last; i++ {
 			consumerPartition(i)
 		}
 	} else {
-		if position <= last {
-			n += 1
-			for i := position * n; i < (position+1)*n; i++ {
-				consumerPartition(i)
-			}
-		} else {
-			start := len(consumer.Subscribe) - (n+1)*last - (position-last)*n
-			for i := start; i < start+n; i++ {
-				consumerPartition(i)
-			}
+		for i := position * n; i < (position+1)*n; i++ {
+			consumerPartition(i)
 		}
 	}
+
 	// 恢复offset
 	consumer.getOffsetInfo()
 	// 调整pull req间隔时间
@@ -465,6 +468,13 @@ func (consumer *Consumer) removeConsumer(consumerId uint32) {
 // register consumer
 func (consumer *Consumer) registerConsumer() (err error) {
 	key := fmt.Sprintf("/consumers/%s/ids/%d", consumer.GroupName, consumer.Id)
+	ctx, _ := context.WithTimeout(context.Background(), queue.DefaultTimeout)
+	if resp, err := consumer.EtcdClient.Get(ctx, key, clientv3.WithPrefix()); err != nil {
+		return err
+	} else if resp.Count > 0 {
+		return errors.New(fmt.Sprintf("consumer{%d} already exist", consumer.Id))
+	}
+
 	_, err = consumer.EtcdClient.Put(context.Background(),
 		key, fmt.Sprintf("%d", consumer.Id), clientv3.WithLease(consumer.EtcdLeaseId))
 	if err != nil {
@@ -576,7 +586,7 @@ func (consumer *Consumer) getOffsetInfo() {
 		if resp.Count > 0 {
 			// 已经存在offset
 			offset, _ = strconv.ParseUint(string(resp.Kvs[0].Value), 10, 64)
-			log.Debug("topic{%d} partition{%d} offset{%d}", pi.Topic, pi.Partition, offset)
+			log.Debugf("topic{%s} partition{%d} offset{%d}", pi.Topic, pi.Partition, offset)
 		} else {
 			// 并不存在offset
 			if consumer.pullStrategy == fromBegin {
@@ -611,7 +621,7 @@ func (consumer *Consumer) getLeastOffset(topic string, partition uint32, leader 
 
 // 提交offset到etcd
 func (consumer *Consumer) commitOffset(topic string, partition uint32, offset uint64) error {
-	log.Debugf("commit topic{%s} partition{%d} offset{%d}", topic, partition, offset)
+	//log.Debugf("commit topic{%s} partition{%d} offset{%d}", topic, partition, offset)
 	key := fmt.Sprintf("/consumers/%s/offsets/%s/%d", consumer.GroupName, topic, partition)
 	_, err := consumer.EtcdClient.Put(context.Background(), key, strconv.FormatUint(offset, 10))
 	return err
