@@ -178,7 +178,17 @@ func (consumer *Consumer) Pull(ctx context.Context, count int) (mbs []*MessageBa
 	for {
 		select {
 		case <-ctx.Done():
-			err = ctx.Err()
+			_, ok := ctx.Deadline()
+			if ok {
+				for _, mb := range mbs {
+					// 获取latestOffset并更新
+					pi := consumer.assignMap[generateKey(mb.Topic, mb.Partition)]
+					pi.Offset = mb.Messages[len(mb.Messages)-1].Offset + 1
+					log.Debugf("topic{%s} partition{%d} newOffset{%d}", pi.Topic, pi.Partition, pi.Offset)
+				}
+			} else {
+				err = ctx.Err()
+			}
 			return
 		case mb := <-consumer.msgBatchChan:
 			//
